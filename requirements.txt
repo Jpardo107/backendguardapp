@@ -16,7 +16,7 @@ jsonschema-specifications==2025.9.1
 packaging==25.0
 pillow==11.3.0
 psycopg2-binary==2.9.10
-pygraphviz==1.14
+#pygraphviz==1.14
 PyJWT==2.10.1
 python-dotenv==1.1.1
 PyYAML==6.0.3
