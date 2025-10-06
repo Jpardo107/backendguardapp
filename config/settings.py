@@ -73,8 +73,9 @@ MIDDLEWARE = [
 # =======================
 # 📂 URLs y WSGI
 # =======================
-ROOT_URLCONF = "backend.urls"  # ajusta el nombre de tu carpeta principal (donde está settings.py)
-WSGI_APPLICATION = "backend.wsgi.application"
+ROOT_URLCONF = "config.urls"
+WSGI_APPLICATION = "config.wsgi.application"
+
 
 # =======================
 # 🧱 Base de datos
