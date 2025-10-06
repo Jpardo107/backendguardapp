@@ -25,4 +25,5 @@ urlpatterns = [
     path("api/", include("core.urls")),
     path("api/", include("accounts.urls")),
     path("api/", include("access_ctrl.urls")),
+    path('api/', include('access_ctrl.urls')),  # ✅ Asegúrate de tener esta línea
 ]

@@ -6,7 +6,7 @@ from rest_framework import status, permissions
 
 from .models import Visita, Acceso, ProhibicionAcceso
 from core.models import Instalacion, Sector, Empresa
-from .serializers import IngresoRequest, SalidaRequest, AccesoSerializer
+from .serializers import IngresoRequest, SalidaRequest, AccesoSerializer, VisitaSerializer
 
 from drf_spectacular.utils import extend_schema
 
@@ -160,3 +160,47 @@ class SalidaView(APIView):
         )
 
         return Response({"ok": True, "acceso": AccesoSerializer(acceso).data}, status=201)
+
+class BuscarPorRUTView(APIView):
+    def get(self, request, rut):
+        try:
+            visita = Visita.objects.get(rut=rut)
+            prohibicion = ProhibicionAcceso.objects.filter(visita=visita).exists()
+            if prohibicion:
+                return Response({
+                    "ok": False,
+                    "mensaje": "Acceso prohibido",
+                    "visita": VisitaSerializer(visita).data
+                }, status=status.HTTP_403_FORBIDDEN)
+            return Response({
+                "ok": True,
+                "mensaje": "Visita encontrada",
+                "visita": VisitaSerializer(visita).data
+            }, status=status.HTTP_200_OK)
+        except Visita.DoesNotExist:
+            return Response({
+                "ok": False,
+                "mensaje": "No se encontró un visitante con ese RUT"
+            }, status=status.HTTP_404_NOT_FOUND)
+
+class BuscarPorDNIView(APIView):
+    def get(self, request, dni):
+        try:
+            visita = Visita.objects.get(dni_extranjero=dni)
+            prohibicion = ProhibicionAcceso.objects.filter(visita=visita).exists()
+            if prohibicion:
+                return Response({
+                    "ok": False,
+                    "mensaje": "Acceso prohibido",
+                    "visita": VisitaSerializer(visita).data
+                }, status=status.HTTP_403_FORBIDDEN)
+            return Response({
+                "ok": True,
+                "mensaje": "Visita encontrada",
+                "visita": VisitaSerializer(visita).data
+            }, status=status.HTTP_200_OK)
+        except Visita.DoesNotExist:
+            return Response({
+                "ok": False,
+                "mensaje": "No se encontró un visitante con ese DNI"
+            }, status=status.HTTP_404_NOT_FOUND)
