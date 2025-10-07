@@ -204,3 +204,29 @@ class BuscarPorDNIView(APIView):
                 "ok": False,
                 "mensaje": "No se encontró un visitante con ese DNI"
             }, status=status.HTTP_404_NOT_FOUND)
+
+class RegistrarVisitaView(APIView):
+    """
+    Crea una nueva visita o actualiza datos mínimos si ya existe.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @extend_schema(request=VisitaSerializer, responses={201: VisitaSerializer})
+    def post(self, request):
+        data = request.data
+
+        # Determinar si es extranjero o no
+        es_extranjero = bool(data.get("dni_extranjero"))
+        data["es_extranjero"] = es_extranjero
+
+        # Crear o actualizar usando tu función auxiliar
+        visita, creada = _crear_o_actualizar_visita(data)
+
+        serializer = VisitaSerializer(visita)
+        mensaje = "Visita creada correctamente" if creada else "Visita actualizada correctamente"
+
+        return Response(
+            {"ok": True, "mensaje": mensaje, "visita": serializer.data},
+            status=status.HTTP_201_CREATED if creada else status.HTTP_200_OK
+        )
+
