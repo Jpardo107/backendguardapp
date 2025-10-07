@@ -16,5 +16,5 @@ urlpatterns = [
     path('visitas/buscar-rut/<str:rut>/', BuscarPorRUTView.as_view(), name='buscar_por_rut'),
     path('visitas/buscar-dni/<str:dni>/', BuscarPorDNIView.as_view(), name='buscar_por_dni'),
     path('visitas/crear/', RegistrarVisitaView.as_view(), name='crear_visita'),
-    path("auth/token/", CustomTokenObtainPairView.as_view(), name="token_obtain_pair"),
+    path("auth/token/id/", CustomTokenObtainPairView.as_view(), name="token_obtain_pair"),
 ]
