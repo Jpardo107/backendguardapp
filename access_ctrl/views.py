@@ -94,7 +94,13 @@ class IngresoView(APIView):
         ser.is_valid(raise_exception=True)
         data = ser.validated_data
 
-        instalacion = Instalacion.objects.get(id=data["instalacion_id"])
+        # ✅ obtiene instalación directamente del token
+        user = request.user
+        if not user.instalacion_id:
+            return Response({"ok": False, "error": "usuario_sin_instalacion_asignada"}, status=400)
+
+        instalacion = Instalacion.objects.get(id=user.instalacion_id)
+
         sector = Sector.objects.get(id=data["sector_id"])
 
         visita, created = _crear_o_actualizar_visita(data)
