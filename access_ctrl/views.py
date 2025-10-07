@@ -94,26 +94,51 @@ class IngresoView(APIView):
         ser.is_valid(raise_exception=True)
         data = ser.validated_data
 
-        # ✅ obtiene instalación directamente del token
+        # ✅ 1️⃣ Obtener instalación desde el usuario logueado
         user = request.user
-        if not user.instalacion_id:
-            return Response({"ok": False, "error": "usuario_sin_instalacion_asignada"}, status=400)
+        if not user.instalacion:
+            return Response(
+                {"ok": False, "error": "usuario_sin_instalacion_asociada"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        instalacion = Instalacion.objects.get(id=user.instalacion_id)
+        instalacion = user.instalacion
 
-        sector = Sector.objects.get(id=data["sector_id"])
+        # ✅ 2️⃣ Obtener el sector por ID
+        sector_id = data.get("sector_id")
+        if not sector_id:
+            return Response(
+                {"ok": False, "error": "sector_id_requerido"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
+        try:
+            sector = Sector.objects.get(id=sector_id, instalacion=instalacion)
+        except Sector.DoesNotExist:
+            return Response(
+                {"ok": False, "error": "sector_no_valido"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # ✅ 3️⃣ Crear o actualizar visita
         visita, created = _crear_o_actualizar_visita(data)
 
-        # bloqueos
+        # ✅ 4️⃣ Verificar prohibición
         if _hay_prohibicion(visita, instalacion):
-            return Response({"ok": False, "error": "prohibido"}, status=status.HTTP_403_FORBIDDEN)
+            return Response(
+                {"ok": False, "error": "prohibido"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
-        # evitar doble ingreso sin salida
+        # ✅ 5️⃣ Evitar doble ingreso
         last = _ultimo_evento(visita, instalacion)
         if last and last.tipo == "ingreso":
-            return Response({"ok": False, "error": "visita_ya_adentro"}, status=status.HTTP_409_CONFLICT)
+            return Response(
+                {"ok": False, "error": "visita_ya_adentro"},
+                status=status.HTTP_409_CONFLICT
+            )
 
+        # ✅ 6️⃣ Registrar acceso
         acceso = Acceso.objects.create(
             visita=visita,
             instalacion=instalacion,
@@ -121,11 +146,14 @@ class IngresoView(APIView):
             tipo="ingreso",
             fecha_hora=timezone.now(),
             comentario=data.get("comentario") or "",
-            guardia=request.user,
+            guardia=user,
             empresa=instalacion.empresa,
         )
 
-        return Response({"ok": True, "acceso": AccesoSerializer(acceso).data}, status=201)
+        return Response(
+            {"ok": True, "mensaje": "Ingreso registrado", "acceso": AccesoSerializer(acceso).data},
+            status=201
+        )
 
 class SalidaView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -136,22 +164,38 @@ class SalidaView(APIView):
         ser.is_valid(raise_exception=True)
         data = ser.validated_data
 
-        instalacion = Instalacion.objects.get(id=data["instalacion_id"])
-        sector = Sector.objects.get(id=data["sector_id"])
+        # ✅ Aquí sí puedes acceder al usuario
+        user = request.user
+        instalacion = user.instalacion
+        if not instalacion:
+            return Response(
+                {"ok": False, "error": "usuario_sin_instalacion_asociada"},
+                status=400
+            )
 
+        sector_id = data.get("sector_id")
+        if not sector_id:
+            return Response(
+                {"ok": False, "error": "sector_id_requerido"},
+                status=400
+            )
+
+        try:
+            sector = Sector.objects.get(id=sector_id, instalacion=instalacion)
+        except Sector.DoesNotExist:
+            return Response(
+                {"ok": False, "error": "sector_no_valido"},
+                status=404
+            )
+
+        # Aquí continúas con el flujo normal:
         visita = _get_visita(data)
         if not visita:
             return Response({"ok": False, "error": "visita_no_encontrada"}, status=404)
 
-        # Debe existir un ingreso previo sin salida posterior
         last = _ultimo_evento(visita, instalacion)
         if not last or last.tipo != "ingreso":
             return Response({"ok": False, "error": "no_hay_ingreso_abierto"}, status=409)
-
-        # Si el sector exige guía/foto → obligatorios
-        if sector.requiere_guia:
-            if not (data.get("comentario") and data.get("foto_url")):
-                return Response({"ok": False, "error": "guia_y_foto_obligatorios"}, status=400)
 
         acceso = Acceso.objects.create(
             visita=visita,
@@ -161,11 +205,15 @@ class SalidaView(APIView):
             fecha_hora=timezone.now(),
             comentario=data.get("comentario") or "",
             foto_url=data.get("foto_url") or "",
-            guardia=request.user,
+            guardia=user,
             empresa=instalacion.empresa,
         )
 
-        return Response({"ok": True, "acceso": AccesoSerializer(acceso).data}, status=201)
+        return Response(
+            {"ok": True, "mensaje": "Salida registrada", "acceso": AccesoSerializer(acceso).data},
+            status=201
+        )
+
 
 class BuscarPorRUTView(APIView):
     def get(self, request, rut):

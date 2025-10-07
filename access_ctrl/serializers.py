@@ -38,7 +38,7 @@ class IngresoRequest(serializers.Serializer):
     empresa = serializers.CharField(required=False, allow_blank=True)
     patente = serializers.CharField(required=False, allow_blank=True)
 
-    instalacion_id = serializers.IntegerField()
+    instalacion_id = serializers.IntegerField(required=False)
     sector_id = serializers.IntegerField()
     comentario = serializers.CharField(required=False, allow_blank=True)
 
