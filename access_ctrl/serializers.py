@@ -57,7 +57,11 @@ class SalidaRequest(serializers.Serializer):
     instalacion_id = serializers.IntegerField()
     sector_id = serializers.IntegerField()
     comentario = serializers.CharField(required=False, allow_blank=True)
-    foto_url = serializers.URLField(required=False, allow_blank=True)
+    foto_url = serializers.ListField(
+        child=serializers.URLField(),
+        required=False,
+        allow_null=True
+    )
 
     def validate(self, data):
         if not data.get("visita_id") and not (data.get("rut") or data.get("dni_extranjero")):

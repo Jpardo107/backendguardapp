@@ -1,3 +1,4 @@
+from django.contrib.postgres.fields import ArrayField
 from django.db import models
 from django.conf import settings
 
@@ -43,7 +44,12 @@ class Acceso(models.Model):
     fecha_hora = models.DateTimeField(db_index=True)
 
     comentario = models.TextField(blank=True, null=True)   # obligatorio si retiro mercadería
-    foto_url = models.URLField(blank=True, null=True)
+    foto_url = models.JSONField(
+        blank=True,
+        null=True,
+        default=list,
+        help_text="Permite guardar una o más URLs de fotos (compatible con SQLite y PostgreSQL)"
+    )
 
     guardia = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="accesos_registrados")
     empresa = models.ForeignKey("core.Empresa", on_delete=models.PROTECT, related_name="accesos")
