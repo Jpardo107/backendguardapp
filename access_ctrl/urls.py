@@ -1,5 +1,6 @@
 from django.urls import path, include
-from .views import IngresoView, SalidaView, AccesoListView, BuscarPorRUTView, BuscarPorDNIView, RegistrarVisitaView
+from .views import IngresoView, SalidaView, AccesoListView, BuscarPorRUTView, BuscarPorDNIView, RegistrarVisitaView, \
+    buscar_ultimo_acceso_por_rut
 from rest_framework.routers import DefaultRouter
 
 from .views_token import CustomTokenObtainPairView
@@ -17,4 +18,5 @@ urlpatterns = [
     path('visitas/buscar-dni/<str:dni>/', BuscarPorDNIView.as_view(), name='buscar_por_dni'),
     path('visitas/crear/', RegistrarVisitaView.as_view(), name='crear_visita'),
     path("auth/token/id/", CustomTokenObtainPairView.as_view(), name="token_obtain_pair"),
+    path("accesos/buscar-ultimo/<str:rut>/", buscar_ultimo_acceso_por_rut, name="buscar_ultimo_acceso_por_rut"),
 ]

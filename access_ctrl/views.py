@@ -1,5 +1,6 @@
 from django.db.models import Q, Max
 from django.utils import timezone
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
@@ -283,4 +284,61 @@ class RegistrarVisitaView(APIView):
             {"ok": True, "mensaje": mensaje, "visita": serializer.data},
             status=status.HTTP_201_CREATED if creada else status.HTTP_200_OK
         )
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def buscar_ultimo_acceso_por_rut(request, rut):
+    """
+    Devuelve el último registro de acceso (ingreso o salida) asociado al RUT.
+    Si no hay ingreso previo abierto, informa que no se puede registrar salida.
+    Incluye información del sector visitado y si requiere documentación de salida.
+    """
+    try:
+        visita = Visita.objects.get(rut=rut)
+    except Visita.DoesNotExist:
+        return Response(
+            {"ok": False, "mensaje": "No existe una visita registrada con ese RUT."},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    # Buscar último acceso registrado
+    ultimo = Acceso.objects.filter(visita=visita).order_by("-fecha_hora").first()
+
+    if not ultimo:
+        return Response(
+            {"ok": False, "mensaje": "No hay registros de accesos para esta visita."},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    # ⚙️ Obtener información del sector y si requiere documentación
+    requiere_doc = ultimo.sector.requiere_guia if hasattr(ultimo.sector, "requiere_guia") else False
+    sector_info = {
+        "id": ultimo.sector.id,
+        "nombre": ultimo.sector.nombre,
+        "requiere_documentacion": requiere_doc
+    }
+
+    # 🚫 Si el último evento fue una salida → no permitir otra salida
+    if ultimo.tipo == "salida":
+        return Response(
+            {
+                "ok": False,
+                "mensaje": "La visita no tiene un ingreso abierto.",
+                "ultimo_acceso": AccesoSerializer(ultimo).data,
+                "sector": sector_info
+            },
+            status=status.HTTP_409_CONFLICT
+        )
+
+    # ✅ Si el último evento fue un ingreso → permitir registrar salida
+    return Response(
+        {
+            "ok": True,
+            "mensaje": "Ingreso encontrado. Puede registrar salida.",
+            "ultimo_acceso": AccesoSerializer(ultimo).data,
+            "sector": sector_info
+        },
+        status=status.HTTP_200_OK
+    )
+
 
