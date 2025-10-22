@@ -67,3 +67,16 @@ class SalidaRequest(serializers.Serializer):
         if not data.get("visita_id") and not (data.get("rut") or data.get("dni_extranjero")):
             raise serializers.ValidationError("Debe enviar visita_id o rut/dni_extranjero.")
         return data
+
+# ---- Visitas por instalacion ----
+class VisitaSimpleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Visita
+        fields = ["id", "rut", "dni_extranjero", "es_extranjero", "nombre", "apellido",
+                  "empresa", "patente", "estado", "instalacion_id", "creado_en"]
+
+# ---- Edicion accesos ----
+class AccesoFullSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Acceso
+        fields = "__all__"  # ✅ todos los campos editables

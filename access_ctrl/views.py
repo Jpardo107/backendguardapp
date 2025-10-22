@@ -1,17 +1,21 @@
-from django.db.models import Q, Max
+from django.db.models import Q, Max, Count
+from django.db.models.functions import TruncDay
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
+from datetime import timedelta, datetime, time
 
 from .models import Visita, Acceso, ProhibicionAcceso
 from core.models import Instalacion, Sector, Empresa
-from .serializers import IngresoRequest, SalidaRequest, AccesoSerializer, VisitaSerializer
+from .serializers import IngresoRequest, SalidaRequest, AccesoSerializer, VisitaSerializer, VisitaSimpleSerializer, \
+    AccesoFullSerializer
+from core.serializers import SectorSer
 
 from drf_spectacular.utils import extend_schema
 
-from rest_framework.generics import ListAPIView
+from rest_framework.generics import ListAPIView, UpdateAPIView
 from rest_framework.permissions import IsAuthenticated
 from .models import Acceso
 from .serializers import AccesoSerializer
@@ -341,4 +345,239 @@ def buscar_ultimo_acceso_por_rut(request, rut):
         status=status.HTTP_200_OK
     )
 
+class AccesosUltimas24View(ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = AccesoSerializer
 
+    def get_queryset(self):
+        user = self.request.user
+        now = timezone.localtime()
+        start = now - timedelta(hours=24)
+
+        qs = Acceso.objects.select_related("visita", "instalacion", "sector").filter(
+            fecha_hora__gte=start
+        )
+
+        # Scope por instalación
+        inst_id = self.request.query_params.get("instalacion_id")
+        if user.is_admin():
+            if inst_id:
+                qs = qs.filter(instalacion_id=inst_id)
+        else:
+            qs = qs.filter(instalacion_id=user.instalacion_id)
+
+        return qs.order_by("-fecha_hora")
+
+class AccesosDiaEnCursoView(ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = AccesoSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        now = timezone.localtime()
+
+        # inicio a las 06:00 del día actual
+        start = timezone.make_aware(datetime.combine(now.date(), time(6, 0)), timezone.get_current_timezone())
+        # fin: 00:00 del día siguiente (medianoche)
+        next_midnight = timezone.make_aware(datetime.combine(now.date() + timedelta(days=1), time(0, 0)),
+                                            timezone.get_current_timezone())
+
+        qs = Acceso.objects.select_related("visita", "instalacion", "sector").filter(
+            fecha_hora__gte=start,
+            fecha_hora__lt=next_midnight
+        )
+
+        inst_id = self.request.query_params.get("instalacion_id")
+        if user.is_admin():
+            if inst_id:
+                qs = qs.filter(instalacion_id=inst_id)
+        else:
+            qs = qs.filter(instalacion_id=user.instalacion_id)
+
+        return qs.order_by("-fecha_hora")
+
+class SectoresPorInstalacionView(ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SectorSer
+
+    def get_queryset(self):
+        user = self.request.user
+        inst_id = self.kwargs.get("instalacion_id")
+
+        if not user.is_admin():
+            inst_id = user.instalacion_id  # ignora ruta si no admin
+
+        return Sector.objects.filter(instalacion_id=inst_id).order_by("nombre")
+
+class VisitasPorInstalacionView(ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = VisitaSimpleSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        inst_id = self.kwargs.get("instalacion_id")
+        if not user.is_admin():
+            inst_id = user.instalacion_id
+
+        qs = Visita.objects.filter(instalacion_id=inst_id).order_by("-creado_en")
+
+        # filtros opcionales: ?q=texto (nombre/rut/dni)
+        q = self.request.query_params.get("q")
+        if q:
+            from django.db.models import Q
+            qs = qs.filter(
+                Q(nombre__icontains=q) |
+                Q(apellido__icontains=q) |
+                Q(rut__icontains=q) |
+                Q(dni_extranjero__icontains=q)
+            )
+        return qs
+
+class AccesosPorMesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        year = int(request.query_params.get("year", timezone.localtime().year))
+        month = int(request.query_params.get("month", timezone.localtime().month))
+
+        inst_id = request.query_params.get("instalacion_id")
+        if not user.is_admin():
+            inst_id = user.instalacion_id
+
+        base = Acceso.objects.filter(
+            instalacion_id=inst_id,
+            fecha_hora__year=year,
+            fecha_hora__month=month,
+        )
+
+        # Resumen diario (ingresos/salidas por día)
+        diario = (base
+                  .annotate(dia=TruncDay("fecha_hora"))
+                  .values("dia", "tipo")
+                  .annotate(total=Count("id"))
+                  .order_by("dia", "tipo"))
+
+        # Detalle opcional
+        include_detail = request.query_params.get("detail") == "1"
+        data = {
+            "year": year, "month": month, "instalacion_id": inst_id,
+            "resumen_diario": list(diario)
+        }
+        if include_detail:
+            data["accesos"] = AccesoSerializer(
+                base.select_related("visita", "sector", "instalacion").order_by("-fecha_hora"),
+                many=True
+            ).data
+
+        return Response({"ok": True, "data": data}, status=200)
+
+class VisitasPorInstalacionView(ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = VisitaSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        instalacion_id = self.kwargs.get("instalacion_id")
+
+        # guardias: sólo sus visitas
+        if not user.is_admin():
+            instalacion_id = user.instalacion_id
+
+        return Visita.objects.filter(instalacion_id=instalacion_id).order_by("-creado_en")
+
+class VisitaUpdateView(UpdateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = VisitaSerializer
+    queryset = Visita.objects.all()
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        user = self.request.user
+        if user.is_admin():
+            return qs
+        return qs.filter(instalacion_id=user.instalacion_id)
+
+class AccesoUpdateAdminView(UpdateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = AccesoFullSerializer
+    queryset = Acceso.objects.all()
+
+    def patch(self, request, *args, **kwargs):
+        user = request.user
+
+        # ✅ Validar que sea admin o superadmin
+        if not user.is_admin():
+            return Response(
+                {"ok": False, "error": "No tiene permisos para editar accesos"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return self.partial_update(request, *args, **kwargs)
+
+    def put(self, request, *args, **kwargs):
+        user = request.user
+        if not user.is_admin():
+            return Response(
+                {"ok": False, "error": "No tiene permisos para editar accesos"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        return self.update(request, *args, **kwargs)
+
+class CargaMasivaAccesosView(APIView):
+    def post(self, request):
+        data = request.data
+        if not isinstance(data, list):
+            return Response({"error": "Debe enviar una lista de accesos"}, status=400)
+
+        creados = 0
+        errores = []
+
+        for acceso_data in data:
+            try:
+                rut = acceso_data.get("rut")
+                nombre = acceso_data.get("nombre") or "Sin nombre"
+
+                # --- buscar o crear visita ---
+                visita, creada = Visita.objects.get_or_create(
+                    rut=rut,
+                    defaults={
+                        "dni_extranjero": acceso_data.get("dni_extranjero", ""),
+                        "es_extranjero": acceso_data.get("es_extranjero", False),
+                        "nombre": nombre,
+                        "apellido": acceso_data.get("apellido", ""),
+                        "empresa": acceso_data.get("empresa", ""),
+                        "patente": acceso_data.get("patente", ""),
+                    },
+                )
+
+                # --- si la visita existe pero sin nombre, actualizarla ---
+                if not visita.nombre:
+                    visita.nombre = nombre
+                    visita.save()
+
+                # --- crear el acceso ---
+                serializer = AccesoSerializer(data={
+                    "visita": visita.id,
+                    "instalacion": acceso_data.get("instalacion_id"),
+                    "sector": acceso_data.get("sector_id"),
+                    "tipo": "ingreso",
+                    "fecha_hora": timezone.now(),
+                    "comentario": acceso_data.get("comentario", ""),
+                    "empresa": 1,  # empresa base de pruebas
+                    "guardia": 1   # usuario base de pruebas
+                })
+
+                if serializer.is_valid():
+                    serializer.save()
+                    creados += 1
+                else:
+                    errores.append(serializer.errors)
+
+            except Exception as e:
+                errores.append(str(e))
+
+        return Response(
+            {"ok": True, "total_creados": creados, "errores": errores[:10]},
+            status=status.HTTP_201_CREATED
+        )
