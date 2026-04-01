@@ -5,6 +5,7 @@ class Empresa(models.Model):
     rut = models.CharField(max_length=16, blank=True, null=True)
     email = models.EmailField(blank=True, null=True)
     telefono = models.CharField(max_length=32, blank=True, null=True)
+    es_administradora_general = models.BooleanField(default=False)
     creado_en = models.DateTimeField(auto_now_add=True)
 
     def __str__(self): return self.nombre

@@ -11,6 +11,23 @@ class Visita(models.Model):
     apellido = models.CharField(max_length=120, blank=True, null=True)
     empresa = models.CharField(max_length=120, blank=True, null=True)
     patente = models.CharField(max_length=12, blank=True, null=True)
+    comentario = models.TextField(blank=True, null=True)
+
+    instalacion = models.ForeignKey(
+        "core.Instalacion",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="visitas"
+    )
+
+    sector = models.ForeignKey(
+        "core.Sector",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="visitas"
+    )
 
     estado = models.CharField(
         max_length=20,

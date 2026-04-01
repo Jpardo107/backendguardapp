@@ -1,7 +1,10 @@
 from django.urls import path, include
 from .views import IngresoView, SalidaView, AccesoListView, BuscarPorRUTView, BuscarPorDNIView, RegistrarVisitaView, \
     buscar_ultimo_acceso_por_rut, VisitasPorInstalacionView, VisitaUpdateView, AccesosUltimas24View, \
-    AccesosDiaEnCursoView, AccesosPorMesView, SectoresPorInstalacionView, AccesoUpdateAdminView, CargaMasivaAccesosView
+    AccesosDiaEnCursoView, AccesosPorMesView, SectoresPorInstalacionView, AccesoUpdateAdminView, CargaMasivaAccesosView, \
+    SectoresDisponiblesView, EnroladosListCreateView, CargaMasivaEnrolamientoView, EnroladoDeleteView, \
+    EnroladoDeleteView, \
+    ProhibirAccesoEnroladoView, DescargarPlantillaEnrolamientoView, HabilitarAccesoEnroladoView
 from rest_framework.routers import DefaultRouter
 
 from .views_token import CustomTokenObtainPairView
@@ -31,4 +34,13 @@ urlpatterns = [
          name='sectores_por_inst'),
     path('accesos/<int:pk>/', AccesoUpdateAdminView.as_view(), name='editar_acceso'),
     path("accesos/carga-masiva/", CargaMasivaAccesosView.as_view(), name="carga_masiva_accesos"),
+
+    path("enrolamiento/sectores/", SectoresDisponiblesView.as_view()),
+    path("enrolamiento/personas/", EnroladosListCreateView.as_view()),
+    path("enrolamiento/carga-masiva/", CargaMasivaEnrolamientoView.as_view()),
+    path("enrolamiento/personas/<int:pk>/", EnroladoDeleteView.as_view()),
+    path("enrolamiento/personas/<int:pk>/", EnroladoDeleteView.as_view()),
+    path("enrolamiento/personas/<int:pk>/prohibir/", ProhibirAccesoEnroladoView.as_view()),
+    path("enrolamiento/plantilla/", DescargarPlantillaEnrolamientoView.as_view()),
+    path("enrolamiento/personas/<int:pk>/habilitar/", HabilitarAccesoEnroladoView.as_view()),
 ]

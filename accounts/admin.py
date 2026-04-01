@@ -16,6 +16,7 @@ class CustomUserCreationForm(UserCreationForm):
             "role",
             "empresa",
             "instalacion",
+            "sector",
         )
 
 
@@ -40,6 +41,7 @@ class UserAdmin(BaseUserAdmin):
         "role",
         "empresa",
         "instalacion",
+        "sector",
         "is_staff",
         "is_active",
         "is_superuser",
@@ -49,6 +51,7 @@ class UserAdmin(BaseUserAdmin):
         "role",
         "empresa",
         "instalacion",
+        "sector",
         "is_staff",
         "is_active",
         "is_superuser",
@@ -57,7 +60,7 @@ class UserAdmin(BaseUserAdmin):
     fieldsets = (
         (None, {"fields": ("username", "password")}),
         ("Información personal", {"fields": ("first_name", "last_name", "email")}),
-        ("Información adicional", {"fields": ("role", "empresa", "instalacion")}),
+        ("Información adicional", {"fields": ("role", "empresa", "instalacion", "sector")}),
         ("Permisos", {"fields": ("is_active", "is_staff", "is_superuser", "groups", "user_permissions")}),
         ("Fechas importantes", {"fields": ("last_login", "date_joined")}),
     )
@@ -75,6 +78,7 @@ class UserAdmin(BaseUserAdmin):
                 "role",
                 "empresa",
                 "instalacion",
+                "sector",
                 "is_active",
                 "is_staff",
                 "is_superuser",

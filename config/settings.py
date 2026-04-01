@@ -60,9 +60,9 @@ INSTALLED_APPS = [
 # =======================
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "corsheaders.middleware.CorsMiddleware",  # ✅ CORS
     "whitenoise.middleware.WhiteNoiseMiddleware",  # ✅ para servir static en Render
     "django.contrib.sessions.middleware.SessionMiddleware",
-    "corsheaders.middleware.CorsMiddleware",        # ✅ CORS
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -76,12 +76,12 @@ MIDDLEWARE = [
 ROOT_URLCONF = "config.urls"
 WSGI_APPLICATION = "config.wsgi.application"
 
-
 # =======================
 # 🧱 Base de datos
 # =======================
 if os.getenv("DATABASE_URL"):
     import dj_database_url
+
     DATABASES = {"default": dj_database_url.parse(os.getenv("DATABASE_URL"), conn_max_age=600)}
 else:
     DATABASES = {
@@ -171,4 +171,3 @@ CORS_ALLOWED_ORIGINS = (
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 AUTH_USER_MODEL = "accounts.User"
-

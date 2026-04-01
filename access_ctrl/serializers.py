@@ -3,20 +3,114 @@ from django.utils import timezone
 from .models import Visita, Acceso
 from core.models import Instalacion, Sector
 from django.contrib.auth import get_user_model
+from rest_framework import serializers
+from .models import Visita
+from core.models import Sector
+from django.utils import timezone
+from django.db import models
 
 User = get_user_model()
 
 class UsuarioSerializer(serializers.ModelSerializer):
+    sector_id = serializers.PrimaryKeyRelatedField(
+        queryset=Sector.objects.all(),
+        source="sector",
+        required=False,
+        allow_null=True
+    )
+
+    password = serializers.CharField(write_only=True, required=True)
+
     class Meta:
         model = User
-        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'is_active', 'is_staff']
-        read_only_fields = ['id', 'is_staff']
+        fields = [
+            "id",
+            "username",
+            "email",
+            "first_name",
+            "last_name",
+            "password",
+            "role",
+            "empresa",
+            "instalacion",
+            "sector_id",
+            "is_active",
+        ]
+        read_only_fields = ["id", "empresa", "instalacion"]
+
+    # 🔹 Solo roles permitidos
+    def validate_role(self, value):
+        if value not in ["admin", "cliente_sector"]:
+            raise serializers.ValidationError(
+                "Solo se permiten roles admin y cliente_sector."
+            )
+        return value
+
+    # 🔹 Validación principal
+    def validate(self, attrs):
+        role = attrs.get("role", getattr(self.instance, "role", None))
+        sector = attrs.get("sector", getattr(self.instance, "sector", None))
+
+        # ❌ Bloquear que frontend setee empresa/instalación
+        attrs.pop("empresa", None)
+        attrs.pop("instalacion", None)
+
+        # 🔹 cliente_sector → requiere sector
+        if role == "cliente_sector" and not sector:
+            raise serializers.ValidationError({
+                "sector_id": "Este campo es obligatorio para usuarios cliente_sector."
+            })
+
+        # 🔹 admin → NO debe tener sector
+        if role == "admin" and sector:
+            raise serializers.ValidationError({
+                "sector_id": "Un usuario admin no debe tener sector."
+            })
+
+        return attrs
+
+    # 🔹 CREATE
+    def create(self, validated_data):
+        password = validated_data.pop("password")
+
+        user = User(**validated_data)
+        user.set_password(password)
+        user.save()
+
+        return user
+
+    # 🔹 UPDATE
+    def update(self, instance, validated_data):
+        password = validated_data.pop("password", None)
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+
+        if password:
+            instance.set_password(password)
+
+        instance.save()
+        return instance
 
 
 class VisitaSerializer(serializers.ModelSerializer):
+    motivo_prohibicion = serializers.SerializerMethodField()
+
     class Meta:
         model = Visita
         fields = "__all__"
+        extra_fields = ["motivo_prohibicion"]
+
+    def get_motivo_prohibicion(self, obj):
+        now = timezone.now()
+
+        prohibicion = obj.prohibiciones.filter(
+            fecha_inicio__lte=now
+        ).filter(
+            models.Q(fecha_fin__isnull=True) | models.Q(fecha_fin__gte=now)
+        ).order_by("-fecha_inicio").first()
+
+        return prohibicion.motivo if prohibicion else None
 
 class AccesoSerializer(serializers.ModelSerializer):
     visita = VisitaSerializer(read_only=True)
@@ -80,3 +174,103 @@ class AccesoFullSerializer(serializers.ModelSerializer):
     class Meta:
         model = Acceso
         fields = "__all__"  # ✅ todos los campos editables
+
+# ---- Enrolamiento manual ----
+class EnrolamientoSerializer(serializers.ModelSerializer):
+    sector_id = serializers.PrimaryKeyRelatedField(
+        queryset=Sector.objects.all(),
+        source="sector",
+        required=False
+    )
+    tipo_documento = serializers.CharField(write_only=True)
+    dni = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    motivo_prohibicion = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Visita
+        fields = [
+            "id",
+            "tipo_documento",
+            "rut",
+            "dni",
+            "nombre",
+            "apellido",
+            "empresa",
+            "patente",
+            "comentario",
+            "sector_id",
+            "es_extranjero",
+            "dni_extranjero",
+            "estado",
+            "motivo_prohibicion",
+        ]
+        read_only_fields = [
+            "es_extranjero",
+            "dni_extranjero",
+            "estado",
+            "motivo_prohibicion",
+        ]
+
+    def get_motivo_prohibicion(self, obj):
+        now = timezone.now()
+
+        prohibicion = obj.prohibiciones.filter(
+            fecha_inicio__lte=now
+        ).filter(
+            models.Q(fecha_fin__isnull=True) | models.Q(fecha_fin__gte=now)
+        ).order_by("-fecha_inicio").first()
+
+        return prohibicion.motivo if prohibicion else None
+
+    def validate(self, attrs):
+        tipo_documento = (attrs.get("tipo_documento") or "").strip().upper()
+        rut = (attrs.get("rut") or "").strip()
+        dni = (attrs.get("dni") or "").strip()
+
+        if tipo_documento not in ["RUT", "DNI"]:
+            raise serializers.ValidationError({
+                "tipo_documento": "Debe ser RUT o DNI"
+            })
+
+        if tipo_documento == "RUT":
+            if not rut:
+                raise serializers.ValidationError({
+                    "rut": "Este campo es obligatorio cuando TIPO DOCUMENTO es RUT"
+                })
+            attrs["es_extranjero"] = False
+            attrs["dni_extranjero"] = None
+
+        if tipo_documento == "DNI":
+            if not dni:
+                raise serializers.ValidationError({
+                    "dni": "Este campo es obligatorio cuando TIPO DOCUMENTO es DNI"
+                })
+            attrs["rut"] = None
+            attrs["es_extranjero"] = True
+            attrs["dni_extranjero"] = dni
+
+        return attrs
+
+    def create(self, validated_data):
+        user = self.context["request"].user
+
+        validated_data.pop("tipo_documento", None)
+        validated_data.pop("dni", None)
+
+        if user.solo_enrolamiento:
+            validated_data["sector"] = user.sector
+            validated_data["instalacion"] = user.instalacion
+            validated_data["empresa"] = user.sector.nombre if user.sector else None
+        else:
+            sector = validated_data.get("sector")
+            if not sector:
+                raise serializers.ValidationError("Debe enviar sector_id")
+
+            validated_data["instalacion"] = sector.instalacion
+            validated_data["empresa"] = sector.nombre
+
+        return super().create(validated_data)
+
+class CargaMasivaEnrolamientoSerializer(serializers.Serializer):
+    archivo = serializers.FileField()
+    sector_id = serializers.IntegerField(required=False)
