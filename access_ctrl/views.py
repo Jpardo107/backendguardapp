@@ -32,23 +32,47 @@ class AccesoListView(ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        queryset = Acceso.objects.all()
+        user = self.request.user
+        queryset = Acceso.objects.select_related(
+            "visita",
+            "instalacion",
+            "sector",
+            "empresa",
+            "guardia",
+        ).all()
 
         visita_id = self.request.query_params.get("visita_id")
         instalacion_id = self.request.query_params.get("instalacion_id")
         empresa_id = self.request.query_params.get("empresa_id")
         tipo = self.request.query_params.get("tipo")
 
+        if es_admin_general(user):
+            if empresa_id:
+                queryset = queryset.filter(empresa_id=empresa_id)
+            if instalacion_id:
+                queryset = queryset.filter(instalacion_id=instalacion_id)
+
+        elif user.role == "admin":
+            queryset = queryset.filter(empresa_id=user.empresa_id)
+            if instalacion_id:
+                queryset = queryset.filter(instalacion_id=instalacion_id)
+
+        elif user.role == "guardia":
+            queryset = queryset.filter(
+                empresa_id=user.empresa_id,
+                instalacion_id=user.instalacion_id
+            )
+
+        else:
+            return Acceso.objects.none()
+
         if visita_id:
             queryset = queryset.filter(visita_id=visita_id)
-        if instalacion_id:
-            queryset = queryset.filter(instalacion_id=instalacion_id)
-        if empresa_id:
-            queryset = queryset.filter(empresa_id=empresa_id)
+
         if tipo in ["ingreso", "salida"]:
             queryset = queryset.filter(tipo=tipo)
 
-        return queryset.order_by("-fecha_hora")  # más reciente primero
+        return queryset.order_by("-fecha_hora")
 
 
 def _get_visita(payload):
@@ -382,12 +406,27 @@ class AccesosUltimas24View(ListAPIView):
         )
 
         empresa_id = self.request.query_params.get("empresa_id")
+        instalacion_id = self.request.query_params.get("instalacion_id")
 
         if es_admin_general(user):
             if empresa_id:
                 qs = qs.filter(empresa_id=empresa_id)
-        else:
+            if instalacion_id:
+                qs = qs.filter(instalacion_id=instalacion_id)
+
+        elif user.role == "admin":
             qs = qs.filter(empresa_id=user.empresa_id)
+            if instalacion_id:
+                qs = qs.filter(instalacion_id=instalacion_id)
+
+        elif user.role == "guardia":
+            qs = qs.filter(
+                empresa_id=user.empresa_id,
+                instalacion_id=user.instalacion_id
+            )
+
+        else:
+            qs = qs.none()
 
         return qs.order_by("-fecha_hora")
 
@@ -426,7 +465,7 @@ class AccesosDiaEnCursoView(ListAPIView):
         )
 
         qs = Acceso.objects.select_related(
-            "visita", "instalacion", "sector", "empresa"
+            "visita", "instalacion", "sector", "empresa", "guardia"
         ).filter(
             fecha_hora__gte=start,
             fecha_hora__lt=next_midnight
@@ -440,13 +479,22 @@ class AccesosDiaEnCursoView(ListAPIView):
                 qs = qs.filter(empresa_id=empresa_id)
             if instalacion_id:
                 qs = qs.filter(instalacion_id=instalacion_id)
-        else:
+
+        elif user.role == "admin":
             qs = qs.filter(empresa_id=user.empresa_id)
             if instalacion_id:
                 qs = qs.filter(instalacion_id=instalacion_id)
 
-        return qs.order_by("-fecha_hora")
+        elif user.role == "guardia":
+            qs = qs.filter(
+                empresa_id=user.empresa_id,
+                instalacion_id=user.instalacion_id
+            )
 
+        else:
+            qs = qs.none()
+
+        return qs.order_by("-fecha_hora")
 
 class SectoresPorInstalacionView(ListAPIView):
     permission_classes = [IsAuthenticated]
