@@ -275,49 +275,97 @@ class SalidaView(APIView):
 
 
 class BuscarPorRUTView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get(self, request, rut):
-        try:
-            visita = Visita.objects.get(rut=rut)
-            prohibicion = ProhibicionAcceso.objects.filter(visita=visita).exists()
-            if prohibicion:
-                return Response({
+        user = request.user
+        instalacion = getattr(user, "instalacion", None)
+
+        if not instalacion:
+            return Response(
+                {"ok": False, "mensaje": "Usuario sin instalación asociada"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        rut_normalizado = _normalizar_documento(rut)
+        visita = None
+
+        for v in Visita.objects.filter(es_extranjero=False):
+            if _normalizar_documento(v.rut or "") == rut_normalizado:
+                visita = v
+                break
+
+        if not visita:
+            return Response(
+                {"ok": False, "mensaje": "No se encontró un visitante con ese RUT"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if _hay_prohibicion(visita, instalacion):
+            return Response(
+                {
                     "ok": False,
                     "mensaje": "Acceso prohibido",
                     "visita": VisitaSerializer(visita).data
-                }, status=status.HTTP_403_FORBIDDEN)
-            return Response({
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return Response(
+            {
                 "ok": True,
                 "mensaje": "Visita encontrada",
                 "visita": VisitaSerializer(visita).data
-            }, status=status.HTTP_200_OK)
-        except Visita.DoesNotExist:
-            return Response({
-                "ok": False,
-                "mensaje": "No se encontró un visitante con ese RUT"
-            }, status=status.HTTP_404_NOT_FOUND)
+            },
+            status=status.HTTP_200_OK
+        )
 
 
 class BuscarPorDNIView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get(self, request, dni):
-        try:
-            visita = Visita.objects.get(dni_extranjero=dni)
-            prohibicion = ProhibicionAcceso.objects.filter(visita=visita).exists()
-            if prohibicion:
-                return Response({
+        user = request.user
+        instalacion = getattr(user, "instalacion", None)
+
+        if not instalacion:
+            return Response(
+                {"ok": False, "mensaje": "Usuario sin instalación asociada"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        dni_normalizado = _normalizar_documento(dni)
+        visita = None
+
+        for v in Visita.objects.filter(es_extranjero=True):
+            if _normalizar_documento(v.dni_extranjero or "") == dni_normalizado:
+                visita = v
+                break
+
+        if not visita:
+            return Response(
+                {"ok": False, "mensaje": "No se encontró un visitante con ese DNI"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if _hay_prohibicion(visita, instalacion):
+            return Response(
+                {
                     "ok": False,
                     "mensaje": "Acceso prohibido",
                     "visita": VisitaSerializer(visita).data
-                }, status=status.HTTP_403_FORBIDDEN)
-            return Response({
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return Response(
+            {
                 "ok": True,
                 "mensaje": "Visita encontrada",
                 "visita": VisitaSerializer(visita).data
-            }, status=status.HTTP_200_OK)
-        except Visita.DoesNotExist:
-            return Response({
-                "ok": False,
-                "mensaje": "No se encontró un visitante con ese DNI"
-            }, status=status.HTTP_404_NOT_FOUND)
+            },
+            status=status.HTTP_200_OK
+        )
 
 
 class RegistrarVisitaView(APIView):
