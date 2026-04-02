@@ -22,6 +22,8 @@ from openpyxl import Workbook
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Font, PatternFill, Alignment
 
+def _normalizar_documento(doc: str) -> str:
+    return (doc or "").replace(".", "").replace("-", "").strip().upper()
 
 def es_admin_general(user):
     return bool(user.empresa and user.empresa.es_administradora_general)
@@ -82,27 +84,37 @@ def _get_visita(payload):
 
     # 2) por documento
     if payload.get("es_extranjero"):
-        dni = (payload.get("dni_extranjero") or "").strip()
+        dni = _normalizar_documento(payload.get("dni_extranjero") or "")
         if dni:
-            return Visita.objects.filter(dni_extranjero=dni, es_extranjero=True).first()
+            visitas = Visita.objects.filter(es_extranjero=True)
+            for visita in visitas:
+                if _normalizar_documento(visita.dni_extranjero or "") == dni:
+                    return visita
     else:
-        rut = (payload.get("rut") or "").strip()
+        rut = _normalizar_documento(payload.get("rut") or "")
         if rut:
-            return Visita.objects.filter(rut=rut, es_extranjero=False).first()
+            visitas = Visita.objects.filter(es_extranjero=False)
+            for visita in visitas:
+                if _normalizar_documento(visita.rut or "") == rut:
+                    return visita
+
     return None
 
 
 def _crear_o_actualizar_visita(payload):
     v = _get_visita(payload)
+
     if v:
-        # completar datos faltantes si vienen
+        # actualizar datos si vienen informados
         for f in ["nombre", "apellido", "empresa", "patente"]:
             val = payload.get(f)
-            if val and not getattr(v, f):
+            if val is not None and str(val).strip() != "":
                 setattr(v, f, val)
+
         v.save()
         return v, False
-    # crear
+
+    # crear nueva visita
     v = Visita.objects.create(
         rut=payload.get("rut") if not payload.get("es_extranjero") else None,
         dni_extranjero=payload.get("dni_extranjero") if payload.get("es_extranjero") else None,
@@ -163,6 +175,11 @@ class IngresoView(APIView):
 
         # ✅ 3️⃣ Crear o actualizar visita
         visita, created = _crear_o_actualizar_visita(data)
+
+        # ✅ Vincular la visita al contexto real de instalación/sector
+        visita.instalacion = instalacion
+        visita.sector = sector
+        visita.save(update_fields=["instalacion", "sector", "actualizado_en"])
 
         # ✅ 4️⃣ Verificar prohibición
         if _hay_prohibicion(visita, instalacion):
