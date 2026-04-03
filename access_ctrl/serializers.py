@@ -12,6 +12,13 @@ from django.db import models
 User = get_user_model()
 
 class UsuarioSerializer(serializers.ModelSerializer):
+    instalacion_id = serializers.PrimaryKeyRelatedField(
+        queryset=Instalacion.objects.all(),
+        source="instalacion",
+        required=False,
+        allow_null=True
+    )
+
     sector_id = serializers.PrimaryKeyRelatedField(
         queryset=Sector.objects.all(),
         source="sector",
@@ -32,66 +39,11 @@ class UsuarioSerializer(serializers.ModelSerializer):
             "password",
             "role",
             "empresa",
-            "instalacion",
+            "instalacion_id",
             "sector_id",
             "is_active",
         ]
-        read_only_fields = ["id", "empresa", "instalacion"]
-
-    # 🔹 Solo roles permitidos
-    def validate_role(self, value):
-        if value not in ["admin", "cliente_sector"]:
-            raise serializers.ValidationError(
-                "Solo se permiten roles admin y cliente_sector."
-            )
-        return value
-
-    # 🔹 Validación principal
-    def validate(self, attrs):
-        role = attrs.get("role", getattr(self.instance, "role", None))
-        sector = attrs.get("sector", getattr(self.instance, "sector", None))
-
-        # ❌ Bloquear que frontend setee empresa/instalación
-        attrs.pop("empresa", None)
-        attrs.pop("instalacion", None)
-
-        # 🔹 cliente_sector → requiere sector
-        if role == "cliente_sector" and not sector:
-            raise serializers.ValidationError({
-                "sector_id": "Este campo es obligatorio para usuarios cliente_sector."
-            })
-
-        # 🔹 admin → NO debe tener sector
-        if role == "admin" and sector:
-            raise serializers.ValidationError({
-                "sector_id": "Un usuario admin no debe tener sector."
-            })
-
-        return attrs
-
-    # 🔹 CREATE
-    def create(self, validated_data):
-        password = validated_data.pop("password")
-
-        user = User(**validated_data)
-        user.set_password(password)
-        user.save()
-
-        return user
-
-    # 🔹 UPDATE
-    def update(self, instance, validated_data):
-        password = validated_data.pop("password", None)
-
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-
-        if password:
-            instance.set_password(password)
-
-        instance.save()
-        return instance
-
+        read_only_fields = ["id", "empresa"]
 
 class VisitaSerializer(serializers.ModelSerializer):
     motivo_prohibicion = serializers.SerializerMethodField()

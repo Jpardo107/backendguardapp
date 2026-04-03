@@ -15,12 +15,16 @@ class UsuarioViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
+        qs = User.objects.all()
 
-        # admin → ve usuarios de su empresa
-        if user.role == "admin" and user.empresa_id:
-            return User.objects.filter(empresa_id=user.empresa_id).order_by("id")
+        if not user.empresa.es_administradora_general:
+            qs = qs.filter(empresa_id=user.empresa_id)
 
-        return User.objects.none()
+        instalacion_id = self.request.query_params.get("instalacion_id")
+        if instalacion_id:
+            qs = qs.filter(instalacion_id=instalacion_id)
+
+        return qs.order_by("username")
 
     def perform_create(self, serializer):
         user = self.request.user
