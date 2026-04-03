@@ -25,7 +25,7 @@ class UsuarioSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True
     )
-
+    sector_nombre = serializers.CharField(source="sector.nombre", read_only=True)
     password = serializers.CharField(write_only=True, required=True)
 
     class Meta:
@@ -42,6 +42,7 @@ class UsuarioSerializer(serializers.ModelSerializer):
             "instalacion_id",
             "sector_id",
             "is_active",
+            "sector_nombre",
         ]
         read_only_fields = ["id", "empresa"]
 
