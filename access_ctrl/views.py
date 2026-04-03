@@ -13,7 +13,7 @@ from datetime import timedelta, datetime, time
 from .models import Visita, Acceso, ProhibicionAcceso, Acceso
 from core.models import Instalacion, Sector, Empresa
 from core.serializers import SectorSer
-from .serializers import AccesoSerializer
+from .serializers import AccesoSerializer, VisitaInlineUpdateSerializer
 from .serializers import IngresoRequest, SalidaRequest, AccesoSerializer, VisitaSerializer, VisitaSimpleSerializer, \
     AccesoFullSerializer, EnrolamientoSerializer, CargaMasivaEnrolamientoSerializer
 from drf_spectacular.utils import extend_schema
@@ -655,7 +655,7 @@ class AccesosPorMesView(APIView):
 
 class VisitaUpdateView(UpdateAPIView):
     permission_classes = [IsAuthenticated]
-    serializer_class = VisitaSerializer
+    serializer_class = VisitaInlineUpdateSerializer
     queryset = Visita.objects.all()
 
     def get_queryset(self):

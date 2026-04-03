@@ -274,3 +274,30 @@ class EnrolamientoSerializer(serializers.ModelSerializer):
 class CargaMasivaEnrolamientoSerializer(serializers.Serializer):
     archivo = serializers.FileField()
     sector_id = serializers.IntegerField(required=False)
+
+class VisitaInlineUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Visita
+        fields = ["rut", "dni_extranjero", "nombre", "apellido", "patente"]
+
+    def validate(self, attrs):
+        instance = getattr(self, "instance", None)
+
+        rut = attrs.get("rut", instance.rut if instance else None)
+        dni = attrs.get("dni_extranjero", instance.dni_extranjero if instance else None)
+        es_extranjero = instance.es_extranjero if instance else False
+
+        if es_extranjero:
+            if not dni:
+                raise serializers.ValidationError({
+                    "dni_extranjero": "Este campo es obligatorio para visitas con DNI."
+                })
+            attrs["rut"] = None
+        else:
+            if not rut:
+                raise serializers.ValidationError({
+                    "rut": "Este campo es obligatorio para visitas con RUT."
+                })
+            attrs["dni_extranjero"] = None
+
+        return attrs
