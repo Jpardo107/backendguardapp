@@ -66,7 +66,10 @@ class VisitaSerializer(serializers.ModelSerializer):
         return prohibicion.motivo if prohibicion else None
 
 class AccesoSerializer(serializers.ModelSerializer):
-    visita = VisitaSerializer(read_only=True)
+    sector_nombre = serializers.CharField(source="sector.nombre", read_only=True)
+    instalacion_nombre = serializers.CharField(source="instalacion.nombre", read_only=True)
+    empresa_nombre = serializers.CharField(source="empresa.nombre", read_only=True)
+
     class Meta:
         model = Acceso
         fields = "__all__"
