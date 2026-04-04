@@ -4,69 +4,47 @@ from .serializers import EmpresaSer, InstalacionSer, SectorSer
 from rest_framework.exceptions import PermissionDenied
 
 
-class BasePerm(permissions.IsAuthenticated): pass
+class BasePerm(permissions.IsAuthenticated):
+    pass
+
 
 def es_admin_general(user):
     return bool(user.empresa and user.empresa.es_administradora_general)
 
 
-class InstalacionView(viewsets.ModelViewSet):
-    serializer_class = InstalacionSer
+# ✅ EMPRESA (FALTABA ESTA CLASE)
+class EmpresaView(viewsets.ModelViewSet):
+    serializer_class = EmpresaSer
     permission_classes = [BasePerm]
 
     def get_queryset(self):
         user = self.request.user
 
-        qs = Instalacion.objects.select_related("empresa").all()
+        if es_admin_general(user):
+            return Empresa.objects.all().order_by("id")
 
-        if not es_admin_general(user):
-            qs = qs.filter(empresa_id=user.empresa_id)
+        if user.empresa_id:
+            return Empresa.objects.filter(id=user.empresa_id)
 
-        empresa_id = self.request.query_params.get("empresa_id")
-        if empresa_id:
-            qs = qs.filter(empresa_id=empresa_id)
-
-        return qs.order_by("id")
+        return Empresa.objects.none()
 
     def perform_create(self, serializer):
-        user = self.request.user
-
-        if es_admin_general(user):
-            serializer.save()
-            return
-
-        empresa = serializer.validated_data.get("empresa")
-        if not empresa or empresa.id != user.empresa_id:
-            raise PermissionDenied("Solo puede crear instalaciones para su propia empresa.")
-
+        if not es_admin_general(self.request.user):
+            raise PermissionDenied("No tiene permisos para crear empresas.")
         serializer.save()
 
     def perform_update(self, serializer):
-        user = self.request.user
-
-        if es_admin_general(user):
-            serializer.save()
-            return
-
-        empresa = serializer.validated_data.get("empresa", serializer.instance.empresa)
-        if not empresa or empresa.id != user.empresa_id:
-            raise PermissionDenied("Solo puede editar instalaciones de su propia empresa.")
-
+        if not es_admin_general(self.request.user):
+            raise PermissionDenied("No tiene permisos para editar empresas.")
         serializer.save()
 
     def perform_destroy(self, instance):
-        user = self.request.user
-
-        if es_admin_general(user):
-            instance.delete()
-            return
-
-        if instance.empresa_id != user.empresa_id:
-            raise PermissionDenied("No tiene permisos para eliminar esta instalación.")
-
+        if not es_admin_general(self.request.user):
+            raise PermissionDenied("No tiene permisos para eliminar empresas.")
         instance.delete()
 
 
+# ✅ INSTALACION (DEJAMOS SOLO UNA)
 class InstalacionView(viewsets.ModelViewSet):
     serializer_class = InstalacionSer
     permission_classes = [BasePerm]
@@ -132,10 +110,14 @@ class SectorView(viewsets.ModelViewSet):
         user = self.request.user
 
         if es_admin_general(user):
-            return Sector.objects.select_related("instalacion", "instalacion__empresa").all().order_by("id")
+            return Sector.objects.select_related(
+                "instalacion", "instalacion__empresa"
+            ).all().order_by("id")
 
         if user.empresa_id:
-            return Sector.objects.select_related("instalacion", "instalacion__empresa").filter(
+            return Sector.objects.select_related(
+                "instalacion", "instalacion__empresa"
+            ).filter(
                 instalacion__empresa_id=user.empresa_id
             ).order_by("id")
 
