@@ -28,6 +28,20 @@ def _normalizar_documento(doc: str) -> str:
 def es_admin_general(user):
     return bool(user.empresa and user.empresa.es_administradora_general)
 
+def puede_gestionar_enrolado(user, visita):
+    if es_admin_general(user):
+        return True
+
+    if user.solo_enrolamiento:
+        return visita.sector_id == user.sector_id
+
+    if getattr(user, "role", None) == "admin":
+        return (
+            visita.instalacion is not None
+            and visita.instalacion.empresa_id == user.empresa_id
+        )
+
+    return False
 
 class AccesoListView(ListAPIView):
     serializer_class = AccesoSerializer
@@ -802,16 +816,19 @@ class EnroladosListCreateView(APIView):
     def get(self, request):
         user = request.user
 
-        # 🔥 cliente_sector → solo su sector
-        if user.solo_enrolamiento:
-            visitas = Visita.objects.filter(sector=user.sector)
+        if es_admin_general(user):
+            visitas = Visita.objects.all().order_by("-id")
 
-        # 🔥 admin → por instalación
-        elif user.instalacion_id:
-            visitas = Visita.objects.filter(instalacion_id=user.instalacion_id)
+        elif user.solo_enrolamiento:
+            visitas = Visita.objects.filter(sector=user.sector).order_by("-id")
+
+        elif user.role == "admin":
+            visitas = Visita.objects.filter(
+                instalacion__empresa_id=user.empresa_id
+            ).order_by("-id")
 
         else:
-            visitas = Visita.objects.all()
+            visitas = Visita.objects.none()
 
         serializer = EnrolamientoSerializer(visitas, many=True)
         return Response(serializer.data)
@@ -1058,57 +1075,11 @@ class EnroladoDeleteView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # cliente sectorial: solo su sector
-        if user.solo_enrolamiento:
-            if visita.sector_id != user.sector_id:
-                return Response(
-                    {"detail": "No tiene permisos para eliminar este registro"},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-
-        # admin normal: solo su instalación
-        elif not es_admin_general(user):
-            if visita.instalacion_id != user.instalacion_id:
-                return Response(
-                    {"detail": "No tiene permisos para eliminar este registro"},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-
-        visita.delete()
-
-        return Response(
-            {"detail": "Registro eliminado correctamente"},
-            status=status.HTTP_200_OK
-        )
-
-
-class EnroladoDeleteView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def delete(self, request, pk):
-        user = request.user
-
-        try:
-            visita = Visita.objects.get(id=pk)
-        except Visita.DoesNotExist:
+        if not puede_gestionar_enrolado(user, visita):
             return Response(
-                {"detail": "Persona enrolada no encontrada"},
-                status=status.HTTP_404_NOT_FOUND
+                {"detail": "No tiene permisos para eliminar este registro"},
+                status=status.HTTP_403_FORBIDDEN
             )
-
-        if user.solo_enrolamiento:
-            if visita.sector_id != user.sector_id:
-                return Response(
-                    {"detail": "No tiene permisos para eliminar este registro"},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-
-        elif not es_admin_general(user):
-            if visita.instalacion_id != user.instalacion_id:
-                return Response(
-                    {"detail": "No tiene permisos para eliminar este registro"},
-                    status=status.HTTP_403_FORBIDDEN
-                )
 
         visita.delete()
 
@@ -1132,24 +1103,13 @@ class ProhibirAccesoEnroladoView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        if user.solo_enrolamiento:
-            if visita.sector_id != user.sector_id:
-                return Response(
-                    {"detail": "No tiene permisos para prohibir el acceso de este registro"},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-            instalacion = user.instalacion
+        if not puede_gestionar_enrolado(user, visita):
+            return Response(
+                {"detail": "No tiene permisos para prohibir el acceso de este registro"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
-        elif not es_admin_general(user):
-            if visita.instalacion_id != user.instalacion_id:
-                return Response(
-                    {"detail": "No tiene permisos para prohibir el acceso de este registro"},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-            instalacion = user.instalacion
-
-        else:
-            instalacion = visita.instalacion
+        instalacion = visita.instalacion
 
         if not instalacion:
             return Response(
@@ -1254,24 +1214,13 @@ class HabilitarAccesoEnroladoView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        if user.solo_enrolamiento:
-            if visita.sector_id != user.sector_id:
-                return Response(
-                    {"detail": "No tiene permisos para habilitar este registro"},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-            instalacion = user.instalacion
+        if not puede_gestionar_enrolado(user, visita):
+            return Response(
+                {"detail": "No tiene permisos para habilitar este registro"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
-        elif not es_admin_general(user):
-            if visita.instalacion_id != user.instalacion_id:
-                return Response(
-                    {"detail": "No tiene permisos para habilitar este registro"},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-            instalacion = user.instalacion
-
-        else:
-            instalacion = visita.instalacion
+        instalacion = visita.instalacion
 
         if not instalacion:
             return Response(
@@ -1293,10 +1242,14 @@ class HabilitarAccesoEnroladoView(APIView):
 
         prohibiciones_activas.update(fecha_fin=timezone.now())
 
-        visita.estado = "activo"
-        visita.save(update_fields=["estado", "actualizado_en"])
+        if not ProhibicionAcceso.objects.filter(
+            visita=visita,
+            fecha_fin__isnull=True
+        ).exists():
+            visita.estado = "activo"
+            visita.save(update_fields=["estado", "actualizado_en"])
 
         return Response(
-            {"detail": "Restricción levantada correctamente"},
+            {"detail": "Acceso habilitado correctamente"},
             status=status.HTTP_200_OK
         )
