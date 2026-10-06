@@ -1,196 +1,69 @@
-from rest_framework import viewsets, permissions
-from rest_framework.exceptions import PermissionDenied, ValidationError
 from django.contrib.auth import get_user_model
+from django.db.models.deletion import ProtectedError
+from rest_framework import viewsets
+from rest_framework.exceptions import PermissionDenied, ValidationError
+from core.permissions import Administrador, es_admin_general, instalaciones_visibles
 from .serializers import UsuarioSerializer
 
 User = get_user_model()
 
 
-def es_admin_general(user):
-    return bool(
-        getattr(user, "empresa", None)
-        and getattr(user.empresa, "es_administradora_general", False)
-    )
-
-
 class UsuarioViewSet(viewsets.ModelViewSet):
     serializer_class = UsuarioSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [Administrador]
 
     def get_queryset(self):
         user = self.request.user
-
         qs = User.objects.select_related("empresa", "instalacion", "sector")
-
-        # Si no es admin general, solo puede ver usuarios de su empresa
         if not es_admin_general(user):
-            if not user.empresa_id:
-                return User.objects.none()
-            qs = qs.filter(empresa_id=user.empresa_id)
+            qs = qs.filter(empresa_id=user.empresa_id, is_superuser=False).exclude(role="superadmin")
+        for field in ("empresa_id", "instalacion_id", "role"):
+            value = self.request.query_params.get(field)
+            if value:
+                qs = qs.filter(**{field: value})
+        return qs.order_by("username")
 
-        # Filtro opcional por empresa
-        empresa_id = self.request.query_params.get("empresa_id")
-        if empresa_id not in [None, ""]:
-            qs = qs.filter(empresa_id=empresa_id)
-
-        # Filtro opcional por instalación
-        instalacion_id = self.request.query_params.get("instalacion_id")
-        if instalacion_id not in [None, ""]:
-            qs = qs.filter(instalacion_id=instalacion_id)
-
-        # Filtro opcional por rol
-        role = self.request.query_params.get("role")
-        if role not in [None, ""]:
-            qs = qs.filter(role=role)
-
-        return qs.order_by("username").distinct()
+    def guardar(self, serializer):
+        user = self.request.user
+        instance = serializer.instance
+        data = serializer.validated_data
+        role = data.get("role", instance.role if instance else "guardia")
+        if role not in ("admin", "guardia", "cliente_sector"):
+            raise ValidationError({"role": "Seleccione administrador, guardia o cliente sector."})
+        if instance and instance.pk == user.pk and (role != user.role or data.get("is_active") is False):
+            raise ValidationError("No puede quitarse sus propios permisos ni desactivar su sesión.")
+        empresa = data.get("empresa", instance.empresa if instance else user.empresa)
+        if not es_admin_general(user) and (not empresa or empresa.pk != user.empresa_id):
+            raise PermissionDenied("Solo puede gestionar usuarios de su empresa.")
+        if role == "admin":
+            if not empresa:
+                raise ValidationError({"empresa": "Seleccione una empresa."})
+            serializer.save(empresa=empresa, instalacion=None, sector=None)
+            return
+        sector = data.get("sector", instance.sector if instance else None)
+        inst = data.get("instalacion", instance.instalacion if instance else None)
+        if role == "cliente_sector":
+            if not sector:
+                raise ValidationError({"sector_id": "Seleccione un sector."})
+            if inst and sector.instalacion_id != inst.id:
+                raise ValidationError({"sector_id": "El sector no pertenece a la instalación seleccionada."})
+            inst = sector.instalacion
+        if not inst or not instalaciones_visibles(user).filter(pk=inst.pk).exists():
+            raise ValidationError({"instalacion_id": "Seleccione una instalación de su empresa."})
+        serializer.save(empresa=inst.empresa, instalacion=inst, sector=sector if role == "cliente_sector" else None)
 
     def perform_create(self, serializer):
-        user = self.request.user
-        role = serializer.validated_data.get("role")
-
-        # SUPERADMIN / ADMIN GENERAL
-        if es_admin_general(user):
-            empresa = serializer.validated_data.get("empresa")
-            sector = serializer.validated_data.get("sector")
-
-            if role == "admin":
-                if not empresa:
-                    raise ValidationError(
-                        {"empresa": "Este campo es obligatorio para crear admin."}
-                    )
-
-                serializer.save(
-                    empresa=empresa,
-                    instalacion=None,
-                    sector=None
-                )
-                return
-
-            if role == "cliente_sector":
-                if not sector:
-                    raise ValidationError({"sector_id": "Este campo es obligatorio."})
-
-                serializer.save(
-                    empresa=sector.instalacion.empresa,
-                    instalacion=sector.instalacion,
-                    sector=sector
-                )
-                return
-
-            raise ValidationError("Rol inválido.")
-
-        # ADMIN EMPRESA NORMAL
-        if user.role != "admin":
-            raise PermissionDenied("Solo los admin pueden crear usuarios.")
-
-        if role == "admin":
-            serializer.save(
-                empresa=user.empresa,
-                instalacion=None,
-                sector=None
-            )
-            return
-
-        if role == "cliente_sector":
-            sector = serializer.validated_data.get("sector")
-
-            if not sector:
-                raise ValidationError({"sector_id": "Este campo es obligatorio."})
-
-            if sector.instalacion.empresa_id != user.empresa_id:
-                raise PermissionDenied("No puede asignar sectores de otra empresa.")
-
-            serializer.save(
-                empresa=user.empresa,
-                instalacion=sector.instalacion,
-                sector=sector
-            )
-            return
-
-        raise ValidationError("Rol inválido.")
+        if not serializer.validated_data.get("password"):
+            raise ValidationError({"password": "La contraseña es obligatoria."})
+        self.guardar(serializer)
 
     def perform_update(self, serializer):
-        user = self.request.user
-        instance = self.get_object()
-        role = serializer.validated_data.get("role", instance.role)
-
-        # SUPERADMIN / ADMIN GENERAL
-        if es_admin_general(user):
-            if role == "admin":
-                empresa = serializer.validated_data.get("empresa", instance.empresa)
-
-                if not empresa:
-                    raise ValidationError(
-                        {"empresa": "Este campo es obligatorio para admin."}
-                    )
-
-                serializer.save(
-                    empresa=empresa,
-                    instalacion=None,
-                    sector=None
-                )
-                return
-
-            if role == "cliente_sector":
-                sector = serializer.validated_data.get("sector", instance.sector)
-
-                if not sector:
-                    raise ValidationError({"sector_id": "Este campo es obligatorio."})
-
-                serializer.save(
-                    empresa=sector.instalacion.empresa,
-                    instalacion=sector.instalacion,
-                    sector=sector
-                )
-                return
-
-            raise ValidationError("Rol inválido.")
-
-        # ADMIN EMPRESA NORMAL
-        if user.role != "admin":
-            raise PermissionDenied("Solo los admin pueden editar usuarios.")
-
-        if instance.empresa_id != user.empresa_id:
-            raise PermissionDenied("No puede editar usuarios de otra empresa.")
-
-        if role == "admin":
-            serializer.save(
-                empresa=user.empresa,
-                instalacion=None,
-                sector=None
-            )
-            return
-
-        if role == "cliente_sector":
-            sector = serializer.validated_data.get("sector", instance.sector)
-
-            if not sector:
-                raise ValidationError({"sector_id": "Este campo es obligatorio."})
-
-            if sector.instalacion.empresa_id != user.empresa_id:
-                raise PermissionDenied("Sector no pertenece a su empresa.")
-
-            serializer.save(
-                empresa=user.empresa,
-                instalacion=sector.instalacion,
-                sector=sector
-            )
-            return
-
-        raise ValidationError("Rol inválido.")
+        self.guardar(serializer)
 
     def perform_destroy(self, instance):
-        user = self.request.user
-
-        if es_admin_general(user):
+        if instance.pk == self.request.user.pk:
+            raise ValidationError("No puede eliminar su propio usuario.")
+        try:
             instance.delete()
-            return
-
-        if user.role != "admin":
-            raise PermissionDenied("Solo admin puede eliminar usuarios.")
-
-        if instance.empresa_id != user.empresa_id:
-            raise PermissionDenied("No puede eliminar usuarios de otra empresa.")
-
-        instance.delete()
+        except ProtectedError:
+            raise ValidationError("Este usuario tiene accesos registrados. Puede desactivarlo para conservar el historial.")

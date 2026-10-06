@@ -1,162 +1,94 @@
-from rest_framework import viewsets, permissions
+from django.db.models.deletion import ProtectedError
+from rest_framework import viewsets
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from .models import Empresa, Instalacion, Sector
 from .serializers import EmpresaSer, InstalacionSer, SectorSer
-from rest_framework.exceptions import PermissionDenied
+from .permissions import CatalogoPermission, es_admin_general, instalaciones_visibles
 
 
-class BasePerm(permissions.IsAuthenticated):
-    pass
+class CatalogoView(viewsets.ModelViewSet):
+    permission_classes = [CatalogoPermission]
+
+    def perform_destroy(self, instance):
+        try:
+            instance.delete()
+        except ProtectedError:
+            raise ValidationError("No se puede eliminar: tiene historial de accesos. Conserve el registro para mantener la trazabilidad.")
 
 
-def es_admin_general(user):
-    return bool(user.empresa and user.empresa.es_administradora_general)
-
-
-# ✅ EMPRESA (FALTABA ESTA CLASE)
-class EmpresaView(viewsets.ModelViewSet):
+class EmpresaView(CatalogoView):
     serializer_class = EmpresaSer
-    permission_classes = [BasePerm]
 
     def get_queryset(self):
-        user = self.request.user
-
-        if es_admin_general(user):
-            return Empresa.objects.all().order_by("id")
-
-        if user.empresa_id:
-            return Empresa.objects.filter(id=user.empresa_id)
-
-        return Empresa.objects.none()
+        qs = Empresa.objects.all()
+        return qs.order_by("id") if es_admin_general(self.request.user) else qs.filter(pk=self.request.user.empresa_id)
 
     def perform_create(self, serializer):
         if not es_admin_general(self.request.user):
-            raise PermissionDenied("No tiene permisos para crear empresas.")
+            raise PermissionDenied("Solo la administración general puede crear empresas.")
         serializer.save()
 
     def perform_update(self, serializer):
-        if not es_admin_general(self.request.user):
-            raise PermissionDenied("No tiene permisos para editar empresas.")
+        if not es_admin_general(self.request.user) and "es_administradora_general" in serializer.validated_data:
+            raise PermissionDenied("No puede cambiar los permisos de la empresa.")
         serializer.save()
 
     def perform_destroy(self, instance):
         if not es_admin_general(self.request.user):
-            raise PermissionDenied("No tiene permisos para eliminar empresas.")
-        instance.delete()
+            raise PermissionDenied("Solo la administración general puede eliminar empresas.")
+        super().perform_destroy(instance)
 
 
-# ✅ INSTALACION (DEJAMOS SOLO UNA)
-class InstalacionView(viewsets.ModelViewSet):
+class InstalacionView(CatalogoView):
     serializer_class = InstalacionSer
-    permission_classes = [BasePerm]
 
     def get_queryset(self):
-        user = self.request.user
-
-        qs = Instalacion.objects.select_related("empresa").all()
-
-        if not es_admin_general(user):
-            qs = qs.filter(empresa_id=user.empresa_id)
-
-        empresa_id = self.request.query_params.get("empresa_id")
-        if empresa_id:
-            qs = qs.filter(empresa_id=empresa_id)
-
-        return qs.order_by("id")
+        qs = instalaciones_visibles(self.request.user)
+        empresa = self.request.query_params.get("empresa_id")
+        return (qs.filter(empresa_id=empresa) if empresa else qs).order_by("nombre")
 
     def perform_create(self, serializer):
-        user = self.request.user
-
-        if es_admin_general(user):
-            serializer.save()
-            return
-
-        empresa = serializer.validated_data.get("empresa")
-        if not empresa or empresa.id != user.empresa_id:
-            raise PermissionDenied("Solo puede crear instalaciones para su propia empresa.")
-
+        empresa = serializer.validated_data["empresa"]
+        if not es_admin_general(self.request.user) and empresa.id != self.request.user.empresa_id:
+            raise PermissionDenied("La instalación debe pertenecer a su empresa.")
         serializer.save()
 
     def perform_update(self, serializer):
-        user = self.request.user
-
-        if es_admin_general(user):
-            serializer.save()
-            return
-
         empresa = serializer.validated_data.get("empresa", serializer.instance.empresa)
-        if not empresa or empresa.id != user.empresa_id:
-            raise PermissionDenied("Solo puede editar instalaciones de su propia empresa.")
-
+        if empresa.id != serializer.instance.empresa_id:
+            raise ValidationError("No se puede trasladar una instalación a otra empresa.")
         serializer.save()
 
     def perform_destroy(self, instance):
-        user = self.request.user
-
-        if es_admin_general(user):
-            instance.delete()
-            return
-
-        if instance.empresa_id != user.empresa_id:
-            raise PermissionDenied("No tiene permisos para eliminar esta instalación.")
-
-        instance.delete()
+        if instance.visitas.exists():
+            raise ValidationError("Esta instalación o sector tiene visitas enroladas. Gestione esos registros antes de eliminarlo.")
+        if instance.usuarios.exists():
+            raise ValidationError("Reasigne o elimine primero los usuarios de esta instalación.")
+        super().perform_destroy(instance)
 
 
-class SectorView(viewsets.ModelViewSet):
+class SectorView(CatalogoView):
     serializer_class = SectorSer
-    permission_classes = [BasePerm]
 
     def get_queryset(self):
-        user = self.request.user
-
-        if es_admin_general(user):
-            return Sector.objects.select_related(
-                "instalacion", "instalacion__empresa"
-            ).all().order_by("id")
-
-        if user.empresa_id:
-            return Sector.objects.select_related(
-                "instalacion", "instalacion__empresa"
-            ).filter(
-                instalacion__empresa_id=user.empresa_id
-            ).order_by("id")
-
-        return Sector.objects.none()
+        qs = Sector.objects.filter(instalacion__in=instalaciones_visibles(self.request.user))
+        inst = self.request.query_params.get("instalacion_id")
+        return (qs.filter(instalacion_id=inst) if inst else qs).order_by("nombre")
 
     def perform_create(self, serializer):
-        user = self.request.user
-        instalacion = serializer.validated_data.get("instalacion")
-
-        if es_admin_general(user):
-            serializer.save()
-            return
-
-        if not instalacion or instalacion.empresa_id != user.empresa_id:
-            raise PermissionDenied("Solo puede crear sectores para instalaciones de su empresa.")
-
+        if not instalaciones_visibles(self.request.user).filter(pk=serializer.validated_data["instalacion"].id).exists():
+            raise PermissionDenied("La instalación no pertenece a su empresa.")
         serializer.save()
 
     def perform_update(self, serializer):
-        user = self.request.user
-        instalacion = serializer.validated_data.get("instalacion", serializer.instance.instalacion)
-
-        if es_admin_general(user):
-            serializer.save()
-            return
-
-        if not instalacion or instalacion.empresa_id != user.empresa_id:
-            raise PermissionDenied("Solo puede editar sectores de su empresa.")
-
+        inst = serializer.validated_data.get("instalacion", serializer.instance.instalacion)
+        if inst.id != serializer.instance.instalacion_id:
+            raise ValidationError("No se puede trasladar un sector a otra instalación.")
         serializer.save()
 
     def perform_destroy(self, instance):
-        user = self.request.user
-
-        if es_admin_general(user):
-            instance.delete()
-            return
-
-        if instance.instalacion.empresa_id != user.empresa_id:
-            raise PermissionDenied("No tiene permisos para eliminar este sector.")
-
-        instance.delete()
+        if instance.visitas.exists():
+            raise ValidationError("Esta instalación o sector tiene visitas enroladas. Gestione esos registros antes de eliminarlo.")
+        if instance.usuarios.exists():
+            raise ValidationError("Reasigne o elimine primero los usuarios de este sector.")
+        super().perform_destroy(instance)

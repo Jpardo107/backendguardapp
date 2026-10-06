@@ -1,3 +1,4 @@
+from core.permissions import es_admin_general
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -19,7 +20,5 @@ class MeView(APIView):
             "instalacion_id": u.instalacion_id,
             "sector_id": u.sector_id,
             "solo_enrolamiento": u.solo_enrolamiento,
-            "es_administradora_general": bool(
-                u.empresa and u.empresa.es_administradora_general
-            ),
+            "es_administradora_general": es_admin_general(u),
         })

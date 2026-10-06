@@ -1,4 +1,8 @@
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
+from django.db.models.deletion import ProtectedError
+from rest_framework.exceptions import ValidationError, PermissionDenied
+from core.permissions import OperacionAcceso, es_admin_general, Administrador, EnrolamientoPermission, instalaciones_visibles
+from .identity import normalizar, coincidencias, instalacion_consulta, bloqueos_otros, datos_personales, prohibiciones_activas
 from django.db.models import Q, Max, Count
 from django.db.models.functions import TruncDay
 from django.utils import timezone
@@ -24,9 +28,6 @@ from openpyxl.styles import Font, PatternFill, Alignment
 
 def _normalizar_documento(doc: str) -> str:
     return (doc or "").replace(".", "").replace("-", "").strip().upper()
-
-def es_admin_general(user):
-    return bool(user.empresa and user.empresa.es_administradora_general)
 
 def puede_gestionar_enrolado(user, visita):
     if es_admin_general(user):
@@ -91,70 +92,50 @@ class AccesoListView(ListAPIView):
         return queryset.order_by("-fecha_hora")
 
 
-def _get_visita(payload):
-    # 1) por id
+def _get_visita(payload, instalacion):
     if payload.get("visita_id"):
-        return Visita.objects.filter(id=payload["visita_id"]).first()
-
-    # 2) por documento
-    if payload.get("es_extranjero"):
-        dni = _normalizar_documento(payload.get("dni_extranjero") or "")
-        if dni:
-            visitas = Visita.objects.filter(es_extranjero=True)
-            for visita in visitas:
-                if _normalizar_documento(visita.dni_extranjero or "") == dni:
-                    return visita
-    else:
-        rut = _normalizar_documento(payload.get("rut") or "")
-        if rut:
-            visitas = Visita.objects.filter(es_extranjero=False)
-            for visita in visitas:
-                if _normalizar_documento(visita.rut or "") == rut:
-                    return visita
-
-    return None
+        return Visita.objects.filter(pk=payload["visita_id"], instalacion=instalacion).first()
+    extranjero = payload.get("es_extranjero", False)
+    documento = payload.get("dni_extranjero") if extranjero else payload.get("rut")
+    return coincidencias(documento, extranjero).filter(instalacion=instalacion).first()
 
 
-def _crear_o_actualizar_visita(payload):
-    v = _get_visita(payload)
-
-    if v:
-        # actualizar datos si vienen informados
-        for f in ["nombre", "apellido", "empresa", "patente"]:
-            val = payload.get(f)
-            if val is not None and str(val).strip() != "":
-                setattr(v, f, val)
-
-        v.save()
-        return v, False
-
-    # crear nueva visita
-    v = Visita.objects.create(
-        rut=payload.get("rut") if not payload.get("es_extranjero") else None,
-        dni_extranjero=payload.get("dni_extranjero") if payload.get("es_extranjero") else None,
-        es_extranjero=payload.get("es_extranjero") or False,
-        nombre=payload.get("nombre") or "Sin nombre",
-        apellido=payload.get("apellido") or "",
-        empresa=payload.get("empresa") or "",
-        patente=payload.get("patente") or "",
-    )
-    return v, True
+def _crear_o_actualizar_visita(payload, instalacion, sector=None):
+    visita = _get_visita(payload, instalacion)
+    if payload.get("visita_id") and not visita:
+        raise ValidationError("La visita no pertenece a esta instalación.")
+    created = visita is None
+    if created:
+        extranjero = payload.get("es_extranjero", False)
+        documento = payload.get("dni_extranjero") if extranjero else payload.get("rut")
+        source = coincidencias(documento, extranjero).filter(instalacion__empresa_id=instalacion.empresa_id).order_by("-actualizado_en").first()
+        values = datos_personales(source) if source else {
+            "rut": payload.get("rut"), "dni_extranjero": payload.get("dni_extranjero"),
+            "es_extranjero": extranjero, "nombre": payload.get("nombre") or "Sin nombre"
+        }
+        visita = Visita(instalacion=instalacion, sector=sector, **values)
+    for f in ("nombre", "apellido", "empresa", "patente"):
+        if payload.get(f) is not None and str(payload[f]).strip():
+            setattr(visita, f, payload[f])
+    # A failed entry must never change another installation's enrolment or status.
+    if sector:
+        visita.sector = sector
+    visita.save()
+    return visita, created
 
 
 def _hay_prohibicion(v, instalacion):
-    now = timezone.now()
-    return ProhibicionAcceso.objects.filter(
-        visita=v, instalacion=instalacion
-    ).filter(Q(fecha_fin__isnull=True, fecha_inicio__lte=now) | Q(fecha_inicio__lte=now, fecha_fin__gte=now)).exists()
+    return prohibiciones_activas().filter(visita=v, instalacion=instalacion).exists()
 
 
 def _ultimo_evento(v, instalacion):
-    return Acceso.objects.filter(visita=v, instalacion=instalacion).order_by("-fecha_hora").first()
+    return Acceso.objects.filter(visita=v, instalacion=instalacion).order_by("-fecha_hora", "-id").first()
 
 
 class IngresoView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [OperacionAcceso]
 
+    @transaction.atomic
     @extend_schema(request=IngresoRequest, responses={201: AccesoSerializer})
     def post(self, request):
         ser = IngresoRequest(data=request.data)
@@ -169,7 +150,7 @@ class IngresoView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        instalacion = user.instalacion
+        instalacion = Instalacion.objects.select_for_update().get(pk=user.instalacion_id) if user.instalacion_id else None
 
         # ✅ 2️⃣ Obtener el sector por ID
         sector_id = data.get("sector_id")
@@ -187,28 +168,14 @@ class IngresoView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # ✅ 3️⃣ Crear o actualizar visita
-        visita, created = _crear_o_actualizar_visita(data)
-
-        # ✅ Vincular la visita al contexto real de instalación/sector
-        visita.instalacion = instalacion
-        visita.sector = sector
-        visita.save(update_fields=["instalacion", "sector", "actualizado_en"])
-
-        # ✅ 4️⃣ Verificar prohibición
-        if _hay_prohibicion(visita, instalacion):
-            return Response(
-                {"ok": False, "error": "prohibido"},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        # ✅ 5️⃣ Evitar doble ingreso
-        last = _ultimo_evento(visita, instalacion)
+        # Serialize writes in this installation and validate before updating personal data.
+        visita = _get_visita(data, instalacion)
+        if visita and _hay_prohibicion(visita, instalacion):
+            return Response({"ok": False, "error": "prohibido"}, status=403)
+        last = _ultimo_evento(visita, instalacion) if visita else None
         if last and last.tipo == "ingreso":
-            return Response(
-                {"ok": False, "error": "visita_ya_adentro"},
-                status=status.HTTP_409_CONFLICT
-            )
+            return Response({"ok": False, "error": "visita_ya_adentro"}, status=409)
+        visita, created = _crear_o_actualizar_visita(data, instalacion, sector)
 
         # ✅ 6️⃣ Registrar acceso
         acceso = Acceso.objects.create(
@@ -229,8 +196,9 @@ class IngresoView(APIView):
 
 
 class SalidaView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [OperacionAcceso]
 
+    @transaction.atomic
     @extend_schema(request=SalidaRequest, responses={201: AccesoSerializer})
     def post(self, request):
         ser = SalidaRequest(data=request.data)
@@ -239,7 +207,7 @@ class SalidaView(APIView):
 
         # ✅ Aquí sí puedes acceder al usuario
         user = request.user
-        instalacion = user.instalacion
+        instalacion = Instalacion.objects.select_for_update().get(pk=user.instalacion_id) if user.instalacion_id else None
         if not instalacion:
             return Response(
                 {"ok": False, "error": "usuario_sin_instalacion_asociada"},
@@ -262,13 +230,18 @@ class SalidaView(APIView):
             )
 
         # Aquí continúas con el flujo normal:
-        visita = _get_visita(data)
+        visita = _get_visita(data, instalacion)
         if not visita:
             return Response({"ok": False, "error": "visita_no_encontrada"}, status=404)
 
         last = _ultimo_evento(visita, instalacion)
         if not last or last.tipo != "ingreso":
             return Response({"ok": False, "error": "no_hay_ingreso_abierto"}, status=409)
+
+        if sector.pk != last.sector_id:
+            raise ValidationError("La salida debe usar el sector del ingreso abierto.")
+        if sector.requiere_guia and (not data.get("comentario", "").strip() or len(data.get("foto_url") or []) < 2):
+            raise ValidationError("Este sector exige comentario y fotografías del documento y de la mercadería.")
 
         acceso = Acceso.objects.create(
             visita=visita,
@@ -290,114 +263,47 @@ class SalidaView(APIView):
 
 class BuscarPorRUTView(APIView):
     permission_classes = [IsAuthenticated]
+    extranjero = False
 
-    def get(self, request, rut):
-        user = request.user
-        instalacion = getattr(user, "instalacion", None)
-
-        if not instalacion:
-            return Response(
-                {"ok": False, "mensaje": "Usuario sin instalación asociada"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        rut_normalizado = _normalizar_documento(rut)
-        visita = None
-
-        for v in Visita.objects.filter(es_extranjero=False):
-            if _normalizar_documento(v.rut or "") == rut_normalizado:
-                visita = v
-                break
-
-        if not visita:
-            return Response(
-                {"ok": False, "mensaje": "No se encontró un visitante con ese RUT"},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        if _hay_prohibicion(visita, instalacion):
-            return Response(
-                {
-                    "ok": False,
-                    "mensaje": "Acceso prohibido",
-                    "visita": VisitaSerializer(visita).data
-                },
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        return Response(
-            {
-                "ok": True,
-                "mensaje": "Visita encontrada",
-                "visita": VisitaSerializer(visita).data
-            },
-            status=status.HTTP_200_OK
-        )
+    def get(self, request, rut=None, dni=None):
+        instalacion = instalacion_consulta(request)
+        documento = dni if self.extranjero else rut
+        matches = coincidencias(documento, self.extranjero)
+        visita = matches.filter(instalacion=instalacion).first()
+        source = visita or matches.filter(instalacion__empresa_id=instalacion.empresa_id).order_by("-actualizado_en").first()
+        if not source:
+            return Response({"ok": False, "mensaje": "No se encontró un visitante con ese documento", "visita": None}, status=404)
+        warnings = bloqueos_otros(documento, self.extranjero, instalacion)
+        blocked = bool(visita and _hay_prohibicion(visita, instalacion))
+        if visita:
+            data = VisitaSerializer(visita).data
+        else:
+            # Preview only: GET must not create enrolments or transfer restrictions.
+            data = {**datos_personales(source), "id": None, "estado": "activo", "comentario": "", "instalacion": instalacion.id, "sector": None, "motivo_prohibicion": None}
+        message = "Acceso prohibido en esta instalación" if blocked else ("Visita encontrada" if visita else "Datos encontrados en otra instalación del cliente. Se creará un registro independiente al guardar.")
+        if blocked and data.get("motivo_prohibicion"):
+            message += ": " + data["motivo_prohibicion"]
+        return Response({"ok": not blocked, "mensaje": message, "visita": data, "datos_copiados": visita is None, "bloqueos_otras_instalaciones": warnings}, status=403 if blocked else 200)
 
 
-class BuscarPorDNIView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, dni):
-        user = request.user
-        instalacion = getattr(user, "instalacion", None)
-
-        if not instalacion:
-            return Response(
-                {"ok": False, "mensaje": "Usuario sin instalación asociada"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        dni_normalizado = _normalizar_documento(dni)
-        visita = None
-
-        for v in Visita.objects.filter(es_extranjero=True):
-            if _normalizar_documento(v.dni_extranjero or "") == dni_normalizado:
-                visita = v
-                break
-
-        if not visita:
-            return Response(
-                {"ok": False, "mensaje": "No se encontró un visitante con ese DNI"},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        if _hay_prohibicion(visita, instalacion):
-            return Response(
-                {
-                    "ok": False,
-                    "mensaje": "Acceso prohibido",
-                    "visita": VisitaSerializer(visita).data
-                },
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        return Response(
-            {
-                "ok": True,
-                "mensaje": "Visita encontrada",
-                "visita": VisitaSerializer(visita).data
-            },
-            status=status.HTTP_200_OK
-        )
+class BuscarPorDNIView(BuscarPorRUTView):
+    extranjero = True
 
 
 class RegistrarVisitaView(APIView):
     """
     Crea una nueva visita o actualiza datos mínimos si ya existe.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [EnrolamientoPermission]
 
     @extend_schema(request=VisitaSerializer, responses={201: VisitaSerializer})
     def post(self, request):
-        data = request.data
-
-        # Determinar si es extranjero o no
-        es_extranjero = bool(data.get("dni_extranjero"))
-        data["es_extranjero"] = es_extranjero
-
-        # Crear o actualizar usando tu función auxiliar
-        visita, creada = _crear_o_actualizar_visita(data)
+        data = request.data.copy()
+        data["es_extranjero"] = bool(data.get("dni_extranjero"))
+        ser = IngresoRequest(data=data)
+        ser.is_valid(raise_exception=True)
+        instalacion = instalacion_consulta(request)
+        visita, creada = _crear_o_actualizar_visita(ser.validated_data, instalacion)
 
         serializer = VisitaSerializer(visita)
         mensaje = "Visita creada correctamente" if creada else "Visita actualizada correctamente"
@@ -416,16 +322,17 @@ def buscar_ultimo_acceso_por_rut(request, rut):
     Si no hay ingreso previo abierto, informa que no se puede registrar salida.
     Incluye información del sector visitado y si requiere documentación de salida.
     """
-    try:
-        visita = Visita.objects.get(rut=rut)
-    except Visita.DoesNotExist:
-        return Response(
-            {"ok": False, "mensaje": "No existe una visita registrada con ese RUT."},
-            status=status.HTTP_404_NOT_FOUND
-        )
-
-    # Buscar último acceso registrado
-    ultimo = Acceso.objects.filter(visita=visita).order_by("-fecha_hora").first()
+    instalacion = instalacion_consulta(request)
+    tipo = request.query_params.get("tipo_documento")
+    matches = Visita.objects.filter(instalacion=instalacion, documento_normalizado=normalizar(rut))
+    if tipo in ("RUT", "DNI"):
+        matches = matches.filter(es_extranjero=tipo == "DNI")
+    elif matches.count() > 1:
+        raise ValidationError("Indique tipo_documento: RUT o DNI.")
+    visita = matches.first()
+    if not visita:
+        return Response({"ok": False, "mensaje": "No existe una visita registrada con ese documento en esta instalación."}, status=404)
+    ultimo = _ultimo_evento(visita, instalacion)
 
     if not ultimo:
         return Response(
@@ -583,7 +490,7 @@ class SectoresPorInstalacionView(ListAPIView):
         user = self.request.user
         inst_id = self.kwargs.get("instalacion_id")
 
-        qs = Sector.objects.filter(instalacion_id=inst_id)
+        qs = Sector.objects.filter(instalacion_id=inst_id, instalacion__in=instalaciones_visibles(user))
 
         if es_admin_general(user):
             return qs.order_by("nombre")
@@ -599,7 +506,7 @@ class VisitasPorInstalacionView(ListAPIView):
         user = self.request.user
         instalacion_id = self.kwargs.get("instalacion_id")
 
-        qs = Visita.objects.filter(instalacion_id=instalacion_id)
+        qs = Visita.objects.filter(instalacion_id=instalacion_id, instalacion__in=instalaciones_visibles(user))
 
         if not es_admin_general(user):
             qs = qs.filter(instalacion__empresa_id=user.empresa_id)
@@ -668,7 +575,7 @@ class AccesosPorMesView(APIView):
 
 
 class VisitaUpdateView(UpdateAPIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [EnrolamientoPermission]
     serializer_class = VisitaInlineUpdateSerializer
     queryset = Visita.objects.all()
 
@@ -679,11 +586,13 @@ class VisitaUpdateView(UpdateAPIView):
         if es_admin_general(user):
             return qs
 
+        if user.solo_enrolamiento:
+            return qs.filter(sector_id=user.sector_id)
         return qs.filter(instalacion__empresa_id=user.empresa_id)
 
 
 class AccesoUpdateAdminView(UpdateAPIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [Administrador]
     serializer_class = AccesoFullSerializer
     queryset = Acceso.objects.all()
 
@@ -723,95 +632,51 @@ class AccesoUpdateAdminView(UpdateAPIView):
 
 
 class CargaMasivaAccesosView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [Administrador]
 
     def post(self, request):
-        data = request.data
-        if not isinstance(data, list):
-            return Response({"error": "Debe enviar una lista de accesos"}, status=400)
-
-        creados = 0
-        errores = []
-        user = request.user
-
-        for acceso_data in data:
+        if not isinstance(request.data, list):
+            raise ValidationError("Debe enviar una lista de accesos.")
+        creados, errores = 0, []
+        for index, payload in enumerate(request.data, start=1):
             try:
-                rut = acceso_data.get("rut")
-                nombre = acceso_data.get("nombre") or "Sin nombre"
-
-                visita, creada = Visita.objects.get_or_create(
-                    rut=rut,
-                    defaults={
-                        "dni_extranjero": acceso_data.get("dni_extranjero", ""),
-                        "es_extranjero": acceso_data.get("es_extranjero", False),
-                        "nombre": nombre,
-                        "apellido": acceso_data.get("apellido", ""),
-                        "empresa": acceso_data.get("empresa", ""),
-                        "patente": acceso_data.get("patente", ""),
-                    },
-                )
-
-                if not visita.nombre:
-                    visita.nombre = nombre
-                    visita.save()
-
-                serializer = AccesoSerializer(data={
-                    "visita": visita.id,
-                    "instalacion": acceso_data.get("instalacion_id"),
-                    "sector": acceso_data.get("sector_id"),
-                    "tipo": "ingreso",
-                    "fecha_hora": timezone.now(),
-                    "comentario": acceso_data.get("comentario", ""),
-                    "empresa": user.empresa_id,
-                    "guardia": user.id
-                })
-
-                if serializer.is_valid():
-                    serializer.save()
+                with transaction.atomic():
+                    ser = IngresoRequest(data=payload)
+                    ser.is_valid(raise_exception=True)
+                    data = ser.validated_data
+                    sector = Sector.objects.filter(pk=data.get("sector_id"), instalacion__in=instalaciones_visibles(request.user)).first()
+                    if not sector:
+                        raise ValidationError("Seleccione un sector de su empresa.")
+                    inst = Instalacion.objects.select_for_update().get(pk=sector.instalacion_id)
+                    visita = _get_visita(data, inst)
+                    if visita and _hay_prohibicion(visita, inst):
+                        raise ValidationError("Acceso prohibido en esta instalación.")
+                    ultimo = _ultimo_evento(visita, inst) if visita else None
+                    if ultimo and ultimo.tipo == "ingreso":
+                        raise ValidationError("La visita ya tiene un ingreso abierto.")
+                    visita, _ = _crear_o_actualizar_visita(data, inst, sector)
+                    Acceso.objects.create(visita=visita, instalacion=inst, sector=sector, empresa=inst.empresa,
+                        guardia=request.user, tipo="ingreso", fecha_hora=timezone.now(), comentario=data.get("comentario", ""))
                     creados += 1
-                else:
-                    errores.append(serializer.errors)
-
-            except Exception as e:
-                errores.append(str(e))
-
-        return Response(
-            {"ok": True, "total_creados": creados, "errores": errores[:10]},
-            status=status.HTTP_201_CREATED
-        )
+            except (ValidationError, IntegrityError) as exc:
+                errores.append({"fila": index, "error": str(exc)})
+        return Response({"ok": not errores, "total_creados": creados, "errores": errores}, status=201)
 
 
 class SectoresDisponiblesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        user = request.user
-
-        # 🔥 usuario sectorial → solo su sector
-        if user.solo_enrolamiento:
-            sectores = Sector.objects.filter(id=user.sector_id)
-
-        # 🔥 admin → sectores de su instalación
-        elif user.instalacion_id:
-            sectores = Sector.objects.filter(instalacion_id=user.instalacion_id)
-
-        else:
-            # superadmin
-            sectores = Sector.objects.all()
-
-        data = [
-            {
-                "id": s.id,
-                "nombre": s.nombre
-            }
-            for s in sectores
-        ]
-
-        return Response(data)
+        sectores = Sector.objects.filter(instalacion__in=instalaciones_visibles(request.user))
+        if request.user.solo_enrolamiento:
+            sectores = sectores.filter(pk=request.user.sector_id)
+        if request.query_params.get("instalacion_id"):
+            sectores = sectores.filter(instalacion_id=request.query_params["instalacion_id"])
+        return Response(SectorSer(sectores.order_by("nombre"), many=True).data)
 
 
 class EnroladosListCreateView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [EnrolamientoPermission]
 
     def get(self, request):
         user = request.user
@@ -830,6 +695,9 @@ class EnroladosListCreateView(APIView):
         else:
             visitas = Visita.objects.none()
 
+        inst_id = request.query_params.get("instalacion_id")
+        if inst_id:
+            visitas = visitas.filter(instalacion_id=inst_id)
         serializer = EnrolamientoSerializer(visitas, many=True)
         return Response(serializer.data)
 
@@ -849,7 +717,7 @@ class EnroladosListCreateView(APIView):
 
 
 class CargaMasivaEnrolamientoView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [EnrolamientoPermission]
 
     def post(self, request):
         serializer = CargaMasivaEnrolamientoSerializer(data=request.data)
@@ -884,6 +752,8 @@ class CargaMasivaEnrolamientoView(APIView):
                 )
 
             instalacion = sector.instalacion
+            if not instalaciones_visibles(user).filter(pk=instalacion.pk).exists():
+                raise PermissionDenied("El sector no pertenece a su empresa.")
 
         try:
             wb = load_workbook(filename=archivo)
@@ -995,7 +865,7 @@ class CargaMasivaEnrolamientoView(APIView):
                     continue
 
                 if Visita.objects.filter(
-                        dni_extranjero=dni_extranjero,
+                        documento_normalizado=normalizar(dni_extranjero), instalacion=instalacion,
                         es_extranjero=True
                 ).exists():
                     errores.append({
@@ -1015,7 +885,7 @@ class CargaMasivaEnrolamientoView(APIView):
                     continue
 
                 if Visita.objects.filter(
-                        rut=rut,
+                        documento_normalizado=normalizar(rut), instalacion=instalacion,
                         es_extranjero=False
                 ).exists():
                     errores.append({
@@ -1062,7 +932,7 @@ class CargaMasivaEnrolamientoView(APIView):
 
 
 class EnroladoDeleteView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [EnrolamientoPermission]
 
     def delete(self, request, pk):
         user = request.user
@@ -1081,7 +951,10 @@ class EnroladoDeleteView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        visita.delete()
+        try:
+            visita.delete()
+        except ProtectedError:
+            raise ValidationError("La visita tiene historial de accesos y no se puede eliminar. Puede bloquear su acceso en esta instalación.")
 
         return Response(
             {"detail": "Registro eliminado correctamente"},
@@ -1090,7 +963,7 @@ class EnroladoDeleteView(APIView):
 
 
 class ProhibirAccesoEnroladoView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [EnrolamientoPermission]
 
     def post(self, request, pk):
         user = request.user
@@ -1148,7 +1021,7 @@ class ProhibirAccesoEnroladoView(APIView):
 
 
 class DescargarPlantillaEnrolamientoView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [EnrolamientoPermission]
 
     def get(self, request):
         wb = Workbook()
@@ -1201,7 +1074,7 @@ class DescargarPlantillaEnrolamientoView(APIView):
 
 
 class HabilitarAccesoEnroladoView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [EnrolamientoPermission]
 
     def post(self, request, pk):
         user = request.user
@@ -1228,19 +1101,15 @@ class HabilitarAccesoEnroladoView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        prohibiciones_activas = ProhibicionAcceso.objects.filter(
-            visita=visita,
-            instalacion=instalacion,
-            fecha_fin__isnull=True
-        )
+        restricciones = prohibiciones_activas().filter(visita=visita, instalacion=instalacion)
 
-        if not prohibiciones_activas.exists():
+        if not restricciones.exists():
             return Response(
                 {"detail": "La persona no tiene una prohibición activa en esta instalación"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        prohibiciones_activas.update(fecha_fin=timezone.now())
+        restricciones.update(fecha_fin=timezone.now())
 
         if not ProhibicionAcceso.objects.filter(
             visita=visita,

@@ -1,3 +1,4 @@
+from core.permissions import es_admin_general as tiene_admin_general
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 
@@ -6,9 +7,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     def get_token(cls, user):
         token = super().get_token(user)
 
-        es_admin_general = bool(
-            user.empresa and user.empresa.es_administradora_general
-        )
+        es_admin_general = tiene_admin_general(user)
 
         token["instalacion_id"] = user.instalacion_id
         token["empresa_id"] = user.empresa_id
@@ -23,9 +22,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         data = super().validate(attrs)
         user = self.user
 
-        es_admin_general = bool(
-            user.empresa and user.empresa.es_administradora_general
-        )
+        es_admin_general = tiene_admin_general(user)
 
         data.update({
             "user_id": user.id,

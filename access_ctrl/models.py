@@ -1,4 +1,3 @@
-from django.contrib.postgres.fields import ArrayField
 from django.db import models
 from django.conf import settings
 
@@ -6,6 +5,8 @@ class Visita(models.Model):
     rut = models.CharField(max_length=12, blank=True, null=True, db_index=True)
     dni_extranjero = models.CharField(max_length=32, blank=True, null=True, db_index=True)
     es_extranjero = models.BooleanField(default=False)
+
+    documento_normalizado = models.CharField(max_length=32, blank=True, default="", db_index=True)
 
     nombre = models.CharField(max_length=120)
     apellido = models.CharField(max_length=120, blank=True, null=True)
@@ -36,6 +37,19 @@ class Visita(models.Model):
     )
     creado_en = models.DateTimeField(auto_now_add=True)
     actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=["instalacion", "es_extranjero", "documento_normalizado"],
+            condition=~models.Q(documento_normalizado=""), name="visita_documento_por_instalacion"
+        )]
+
+    def save(self, *args, **kwargs):
+        documento = self.dni_extranjero if self.es_extranjero else self.rut
+        self.documento_normalizado = (documento or "").replace(".", "").replace("-", "").strip().upper()
+        if kwargs.get("update_fields") is not None:
+            kwargs["update_fields"] = set(kwargs["update_fields"]) | {"documento_normalizado"}
+        super().save(*args, **kwargs)
 
     def __str__(self):
         doc = self.dni_extranjero if self.es_extranjero else self.rut

@@ -1,3 +1,5 @@
+from core.permissions import instalaciones_visibles
+from .identity import normalizar, coincidencias, bloqueos_otros, prohibiciones_activas
 from rest_framework import serializers
 from django.utils import timezone
 from .models import Visita, Acceso
@@ -76,6 +78,18 @@ class UsuarioSerializer(serializers.ModelSerializer):
         return instance
 
 class VisitaSerializer(serializers.ModelSerializer):
+    bloqueos_otras_instalaciones = serializers.SerializerMethodField()
+
+    def get_bloqueos_otras_instalaciones(self, obj):
+        if not obj.instalacion_id:
+            return []
+        key = (obj.documento_normalizado, obj.es_extranjero, obj.instalacion_id)
+        cache = self.context.setdefault("bloqueos_cache", {})
+        if key not in cache:
+            cache[key] = bloqueos_otros(obj.documento_normalizado, obj.es_extranjero, obj.instalacion)
+        return cache[key]
+
+    estado = serializers.SerializerMethodField()
     motivo_prohibicion = serializers.SerializerMethodField()
 
     class Meta:
@@ -83,14 +97,11 @@ class VisitaSerializer(serializers.ModelSerializer):
         fields = "__all__"
         extra_fields = ["motivo_prohibicion"]
 
-    def get_motivo_prohibicion(self, obj):
-        now = timezone.now()
+    def get_estado(self, obj):
+        return "prohibido" if self.get_motivo_prohibicion(obj) else ("residente" if obj.estado == "residente" else "activo")
 
-        prohibicion = obj.prohibiciones.filter(
-            fecha_inicio__lte=now
-        ).filter(
-            models.Q(fecha_fin__isnull=True) | models.Q(fecha_fin__gte=now)
-        ).order_by("-fecha_inicio").first()
+    def get_motivo_prohibicion(self, obj):
+        prohibicion = prohibiciones_activas().filter(visita=obj, instalacion_id=obj.instalacion_id).order_by("-fecha_inicio").first()
 
         return prohibicion.motivo if prohibicion else None
 
@@ -123,8 +134,15 @@ class IngresoRequest(serializers.Serializer):
     comentario = serializers.CharField(required=False, allow_blank=True)
 
     def validate(self, data):
-        if not data.get("visita_id") and not (data.get("rut") or data.get("dni_extranjero")):
-            raise serializers.ValidationError("Debe enviar visita_id o rut/dni_extranjero.")
+        if not data.get("visita_id"):
+            rut, dni = data.get("rut"), data.get("dni_extranjero")
+            if not (rut or dni):
+                raise serializers.ValidationError("Debe enviar visita_id o rut/dni_extranjero.")
+            if rut and dni:
+                raise serializers.ValidationError("Envíe un solo tipo de documento.")
+            if data.get("es_extranjero") and not dni:
+                raise serializers.ValidationError("Debe enviar dni_extranjero para una visita extranjera.")
+            data["es_extranjero"] = bool(dni)
         return data
 
 # ---- Salida ----
@@ -144,8 +162,15 @@ class SalidaRequest(serializers.Serializer):
     )
 
     def validate(self, data):
-        if not data.get("visita_id") and not (data.get("rut") or data.get("dni_extranjero")):
-            raise serializers.ValidationError("Debe enviar visita_id o rut/dni_extranjero.")
+        if not data.get("visita_id"):
+            rut, dni = data.get("rut"), data.get("dni_extranjero")
+            if not (rut or dni):
+                raise serializers.ValidationError("Debe enviar visita_id o rut/dni_extranjero.")
+            if rut and dni:
+                raise serializers.ValidationError("Envíe un solo tipo de documento.")
+            if data.get("es_extranjero") and not dni:
+                raise serializers.ValidationError("Debe enviar dni_extranjero para una visita extranjera.")
+            data["es_extranjero"] = bool(dni)
         return data
 
 # ---- Visitas por instalacion ----
@@ -159,10 +184,24 @@ class VisitaSimpleSerializer(serializers.ModelSerializer):
 class AccesoFullSerializer(serializers.ModelSerializer):
     class Meta:
         model = Acceso
-        fields = "__all__"  # ✅ todos los campos editables
+        fields = "__all__"
+        read_only_fields = ["visita", "instalacion", "sector", "empresa", "guardia", "tipo", "fecha_hora"]
 
 # ---- Enrolamiento manual ----
 class EnrolamientoSerializer(serializers.ModelSerializer):
+    estado = serializers.SerializerMethodField()
+    instalacion_id = serializers.IntegerField(read_only=True)
+    instalacion_nombre = serializers.CharField(source="instalacion.nombre", read_only=True)
+    bloqueos_otras_instalaciones = serializers.SerializerMethodField()
+
+    def get_estado(self, obj):
+        return "prohibido" if self.get_motivo_prohibicion(obj) else ("residente" if obj.estado == "residente" else "activo")
+
+    def get_bloqueos_otras_instalaciones(self, obj):
+        if not obj.instalacion_id:
+            return []
+        return bloqueos_otros(obj.documento_normalizado, obj.es_extranjero, obj.instalacion)
+
     sector_id = serializers.PrimaryKeyRelatedField(
         queryset=Sector.objects.all(),
         source="sector",
@@ -188,7 +227,7 @@ class EnrolamientoSerializer(serializers.ModelSerializer):
             "es_extranjero",
             "dni_extranjero",
             "estado",
-            "motivo_prohibicion",
+            "motivo_prohibicion", "instalacion_id", "instalacion_nombre", "bloqueos_otras_instalaciones",
         ]
         read_only_fields = [
             "es_extranjero",
@@ -198,13 +237,7 @@ class EnrolamientoSerializer(serializers.ModelSerializer):
         ]
 
     def get_motivo_prohibicion(self, obj):
-        now = timezone.now()
-
-        prohibicion = obj.prohibiciones.filter(
-            fecha_inicio__lte=now
-        ).filter(
-            models.Q(fecha_fin__isnull=True) | models.Q(fecha_fin__gte=now)
-        ).order_by("-fecha_inicio").first()
+        prohibicion = prohibiciones_activas().filter(visita=obj, instalacion_id=obj.instalacion_id).order_by("-fecha_inicio").first()
 
         return prohibicion.motivo if prohibicion else None
 
@@ -235,6 +268,18 @@ class EnrolamientoSerializer(serializers.ModelSerializer):
             attrs["es_extranjero"] = True
             attrs["dni_extranjero"] = dni
 
+        user = self.context["request"].user
+        sector = user.sector if user.solo_enrolamiento else attrs.get("sector")
+        if not sector or not instalaciones_visibles(user).filter(pk=sector.instalacion_id).exists():
+            raise serializers.ValidationError({"sector_id": "Seleccione un sector de su empresa."})
+        requested_inst = self.initial_data.get("instalacion_id")
+        if requested_inst and str(requested_inst) != str(sector.instalacion_id):
+            raise serializers.ValidationError("El sector no pertenece a la instalación seleccionada.")
+        attrs["sector"] = sector
+        attrs["instalacion"] = sector.instalacion
+        documento = attrs.get("dni_extranjero") if attrs.get("es_extranjero") else attrs.get("rut")
+        if coincidencias(documento, attrs.get("es_extranjero", False)).filter(instalacion=sector.instalacion).exists():
+            raise serializers.ValidationError("La persona ya está enrolada en esta instalación.")
         return attrs
 
     def create(self, validated_data):
@@ -264,7 +309,7 @@ class CargaMasivaEnrolamientoSerializer(serializers.Serializer):
 class VisitaInlineUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Visita
-        fields = ["rut", "dni_extranjero", "nombre", "apellido", "patente"]
+        fields = ["rut", "dni_extranjero", "nombre", "apellido", "patente", "empresa", "comentario", "sector"]
 
     def validate(self, attrs):
         instance = getattr(self, "instance", None)
@@ -286,4 +331,14 @@ class VisitaInlineUpdateSerializer(serializers.ModelSerializer):
                 })
             attrs["dni_extranjero"] = None
 
+        if instance:
+            sector = attrs.get("sector", instance.sector)
+            user = self.context["request"].user
+            if user.solo_enrolamiento and sector and sector.pk != user.sector_id:
+                raise serializers.ValidationError("Solo puede gestionar su sector asignado.")
+            if sector and sector.instalacion_id != instance.instalacion_id:
+                raise serializers.ValidationError("El sector debe pertenecer a la misma instalación.")
+            documento = dni if es_extranjero else rut
+            if coincidencias(documento, es_extranjero).filter(instalacion_id=instance.instalacion_id).exclude(pk=instance.pk).exists():
+                raise serializers.ValidationError("El documento ya existe en esta instalación.")
         return attrs
