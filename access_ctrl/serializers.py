@@ -1,5 +1,6 @@
 from core.permissions import instalaciones_visibles
-from .identity import normalizar, coincidencias, bloqueos_otros, prohibiciones_activas
+from .identity import normalizar, coincidencias
+from .serialization_state import EstadoVisitaMixin, EstadoVisitasListSerializer
 from rest_framework import serializers
 from django.utils import timezone
 from .models import Visita, Acceso
@@ -77,33 +78,15 @@ class UsuarioSerializer(serializers.ModelSerializer):
         instance.save()
         return instance
 
-class VisitaSerializer(serializers.ModelSerializer):
+class VisitaSerializer(EstadoVisitaMixin, serializers.ModelSerializer):
     bloqueos_otras_instalaciones = serializers.SerializerMethodField()
-
-    def get_bloqueos_otras_instalaciones(self, obj):
-        if not obj.instalacion_id:
-            return []
-        key = (obj.documento_normalizado, obj.es_extranjero, obj.instalacion_id)
-        cache = self.context.setdefault("bloqueos_cache", {})
-        if key not in cache:
-            cache[key] = bloqueos_otros(obj.documento_normalizado, obj.es_extranjero, obj.instalacion)
-        return cache[key]
-
     estado = serializers.SerializerMethodField()
     motivo_prohibicion = serializers.SerializerMethodField()
 
     class Meta:
         model = Visita
         fields = "__all__"
-        extra_fields = ["motivo_prohibicion"]
-
-    def get_estado(self, obj):
-        return "prohibido" if self.get_motivo_prohibicion(obj) else ("residente" if obj.estado == "residente" else "activo")
-
-    def get_motivo_prohibicion(self, obj):
-        prohibicion = prohibiciones_activas().filter(visita=obj, instalacion_id=obj.instalacion_id).order_by("-fecha_inicio").first()
-
-        return prohibicion.motivo if prohibicion else None
+        list_serializer_class = EstadoVisitasListSerializer
 
 class AccesoSerializer(serializers.ModelSerializer):
     visita = VisitaSerializer(read_only=True)
@@ -114,6 +97,7 @@ class AccesoSerializer(serializers.ModelSerializer):
     class Meta:
         model = Acceso
         fields = "__all__"
+        list_serializer_class = EstadoVisitasListSerializer
 
 # ---- Ingreso ----
 class IngresoRequest(serializers.Serializer):
@@ -188,19 +172,11 @@ class AccesoFullSerializer(serializers.ModelSerializer):
         read_only_fields = ["visita", "instalacion", "sector", "empresa", "guardia", "tipo", "fecha_hora"]
 
 # ---- Enrolamiento manual ----
-class EnrolamientoSerializer(serializers.ModelSerializer):
+class EnrolamientoSerializer(EstadoVisitaMixin, serializers.ModelSerializer):
     estado = serializers.SerializerMethodField()
     instalacion_id = serializers.IntegerField(read_only=True)
     instalacion_nombre = serializers.CharField(source="instalacion.nombre", read_only=True)
     bloqueos_otras_instalaciones = serializers.SerializerMethodField()
-
-    def get_estado(self, obj):
-        return "prohibido" if self.get_motivo_prohibicion(obj) else ("residente" if obj.estado == "residente" else "activo")
-
-    def get_bloqueos_otras_instalaciones(self, obj):
-        if not obj.instalacion_id:
-            return []
-        return bloqueos_otros(obj.documento_normalizado, obj.es_extranjero, obj.instalacion)
 
     sector_id = serializers.PrimaryKeyRelatedField(
         queryset=Sector.objects.all(),
@@ -213,6 +189,7 @@ class EnrolamientoSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Visita
+        list_serializer_class = EstadoVisitasListSerializer
         fields = [
             "id",
             "tipo_documento",
@@ -235,11 +212,6 @@ class EnrolamientoSerializer(serializers.ModelSerializer):
             "estado",
             "motivo_prohibicion",
         ]
-
-    def get_motivo_prohibicion(self, obj):
-        prohibicion = prohibiciones_activas().filter(visita=obj, instalacion_id=obj.instalacion_id).order_by("-fecha_inicio").first()
-
-        return prohibicion.motivo if prohibicion else None
 
     def validate(self, attrs):
         tipo_documento = (attrs.get("tipo_documento") or "").strip().upper()

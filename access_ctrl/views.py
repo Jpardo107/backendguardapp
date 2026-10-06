@@ -2,7 +2,7 @@ from django.db import IntegrityError, transaction
 from django.db.models.deletion import ProtectedError
 from rest_framework.exceptions import ValidationError, PermissionDenied
 from core.permissions import OperacionAcceso, es_admin_general, Administrador, EnrolamientoPermission, instalaciones_visibles
-from .identity import normalizar, coincidencias, instalacion_consulta, bloqueos_otros, datos_personales, prohibiciones_activas
+from .identity import normalizar, coincidencias, instalacion_consulta, bloqueos_otros, datos_personales, prohibiciones_activas, validar_documento_consulta
 from django.db.models import Q, Max, Count
 from django.db.models.functions import TruncDay
 from django.utils import timezone
@@ -129,7 +129,7 @@ def _hay_prohibicion(v, instalacion):
 
 
 def _ultimo_evento(v, instalacion):
-    return Acceso.objects.filter(visita=v, instalacion=instalacion).order_by("-fecha_hora", "-id").first()
+    return Acceso.objects.select_related("visita__instalacion", "instalacion", "sector", "empresa").filter(visita=v, instalacion=instalacion).order_by("-fecha_hora", "-id").first()
 
 
 class IngresoView(APIView):
@@ -267,17 +267,19 @@ class BuscarPorRUTView(APIView):
 
     def get(self, request, rut=None, dni=None):
         instalacion = instalacion_consulta(request)
-        documento = dni if self.extranjero else rut
-        matches = coincidencias(documento, self.extranjero)
+        documento = validar_documento_consulta(dni if self.extranjero else rut, self.extranjero)
+        matches = coincidencias(documento, self.extranjero).select_related("instalacion")
         visita = matches.filter(instalacion=instalacion).first()
         source = visita or matches.filter(instalacion__empresa_id=instalacion.empresa_id).order_by("-actualizado_en").first()
         if not source:
             return Response({"ok": False, "mensaje": "No se encontró un visitante con ese documento", "visita": None}, status=404)
-        warnings = bloqueos_otros(documento, self.extranjero, instalacion)
-        blocked = bool(visita and _hay_prohibicion(visita, instalacion))
         if visita:
             data = VisitaSerializer(visita).data
+            warnings = data["bloqueos_otras_instalaciones"]
+            blocked = data["estado"] == "prohibido"
         else:
+            warnings = bloqueos_otros(documento, self.extranjero, instalacion)
+            blocked = False
             # Preview only: GET must not create enrolments or transfer restrictions.
             data = {**datos_personales(source), "id": None, "estado": "activo", "comentario": "", "instalacion": instalacion.id, "sector": None, "motivo_prohibicion": None}
         message = "Acceso prohibido en esta instalación" if blocked else ("Visita encontrada" if visita else "Datos encontrados en otra instalación del cliente. Se creará un registro independiente al guardar.")
@@ -324,6 +326,7 @@ def buscar_ultimo_acceso_por_rut(request, rut):
     """
     instalacion = instalacion_consulta(request)
     tipo = request.query_params.get("tipo_documento")
+    validar_documento_consulta(rut, extranjero=tipo != "RUT")
     matches = Visita.objects.filter(instalacion=instalacion, documento_normalizado=normalizar(rut))
     if tipo in ("RUT", "DNI"):
         matches = matches.filter(es_extranjero=tipo == "DNI")
@@ -420,16 +423,18 @@ class AccesosUltimas24View(ListAPIView):
         queryset = self.get_queryset()
         serializer = self.get_serializer(queryset, many=True)
 
-        total = queryset.count()
-        total_ingresos = queryset.filter(tipo="ingreso").count()
-        total_salidas = queryset.filter(tipo="salida").count()
+        # Reuse the evaluated rows: no extra counts or duplicate relationship loads.
+        results = serializer.data
+        total = len(results)
+        total_ingresos = sum(row["tipo"] == "ingreso" for row in results)
+        total_salidas = sum(row["tipo"] == "salida" for row in results)
 
         return Response({
             "ok": True,
             "total": total,
             "total_ingresos": total_ingresos,
             "total_salidas": total_salidas,
-            "results": serializer.data
+            "results": results
         })
 
 
