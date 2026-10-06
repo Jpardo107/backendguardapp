@@ -1,4 +1,4 @@
-from django.db import connection
+from django.db import connection, IntegrityError, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 from django.utils import timezone
@@ -48,5 +48,14 @@ class LegacyVisitMigrationTests(TransactionTestCase):
             self.assertEqual(va.estado, "prohibido")
             self.assertEqual(vb.estado, "activo")
             self.assertFalse(P.objects.filter(instalacion=b.pk).exists())
+            # The data migration must finish with the real unique index in place,
+            # including on PostgreSQL where the FK updates queue deferred triggers.
+            with connection.cursor() as cursor:
+                constraints = connection.introspection.get_constraints(cursor, V._meta.db_table)
+            self.assertTrue(constraints["visita_documento_por_instalacion"]["unique"])
+            with self.assertRaises(IntegrityError), transaction.atomic():
+                V.objects.create(instalacion_id=a.pk, rut="12345678-5", nombre="Duplicada",
+                                 documento_normalizado="123456785", es_extranjero=False)
+            self.assertEqual(MigrationExecutor(connection).migration_plan(after), [])
         finally:
             MigrationExecutor(connection).migrate(after)

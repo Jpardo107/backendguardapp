@@ -57,6 +57,13 @@ def separar_visitas(apps, schema_editor):
     active = prohibiciones.filter(fecha_inicio__lte=now).filter(models.Q(fecha_fin__isnull=True) | models.Q(fecha_fin__gt=now))
     visitas.filter(pk__in=active.values("visita_id")).update(estado="prohibido")
 
+    if schema_editor.connection.vendor == "postgresql":
+        # Reassigning foreign keys queues deferred constraint triggers. Validate
+        # them before AddConstraint and AddField's deferred CREATE INDEX run.
+        # Keep the migration atomic: invalid data must roll back the whole change.
+        with schema_editor.connection.cursor() as cursor:
+            cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
+
 
 class Migration(migrations.Migration):
     dependencies = [("access_ctrl", "0005_visita_instalacion_visita_sector")]

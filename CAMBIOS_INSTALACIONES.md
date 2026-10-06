@@ -39,3 +39,32 @@ Las instalaciones/sectores con visitas o usuarios asignados deben liberarse prim
 `config.test_settings` usa exclusivamente SQLite en memoria, sin conectar a la base configurada por `DATABASE_URL`. Las pruebas cubren aislamiento entre instalaciones y empresas, copia de datos, alertas, bloqueos locales, permisos de guardia, CRUD del administrador, importaciones, reglas de salida y migración del historial anterior.
 
 Web: `npm run build`. Android: `./gradlew :app:compileDebugKotlin --offline` con Java compatible con Gradle 8.9.
+
+## Corrección de migración en PostgreSQL
+
+Se reprodujo el fallo `cannot CREATE INDEX ... because it has pending trigger events`
+con PostgreSQL 14.17 y registros históricos. La migración 0006 ahora ejecuta
+`SET CONSTRAINTS ALL IMMEDIATE` después de reorganizar los datos y antes de crear
+el índice único. Esto valida las relaciones pendientes sin desactivar restricciones
+ni perder la protección de la transacción. También permite crear el índice diferido
+del nuevo campo `documento_normalizado` al cerrar el editor de esquema.
+
+La migración conserva el mismo nombre y esquema final. En el despliegue que falló
+se vuelve a ejecutar con `python manage.py migrate` después de publicar la corrección;
+no es necesario marcarla con `--fake` ni eliminar datos. Los entornos que ya aplicaron
+0006 no necesitan volver a ejecutarla.
+
+Para ejecutar las pruebas en una instancia PostgreSQL de pruebas, independiente de
+`DATABASE_URL`:
+
+```sh
+INOUT_TEST_PG_HOST=127.0.0.1 INOUT_TEST_PG_PORT=5432 INOUT_TEST_PG_USER=usuario_pruebas \
+  .venv/bin/python manage.py test --settings=config.settings_postgres_test --noinput
+```
+
+La conexión debe apuntar a una instancia de pruebas: el runner crea y elimina
+`test_inout_migration`. La contraseña opcional se proporciona mediante
+`INOUT_TEST_PG_PASSWORD`. La prueba de migración comprueba el historial, los bloqueos,
+la creación efectiva del índice único y el rechazo de documentos duplicados.
+
+Referencia: [comprobaciones diferidas de PostgreSQL](https://www.postgresql.org/docs/current/sql-set-constraints.html).
